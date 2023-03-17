@@ -137,6 +137,8 @@ type Database interface {
 	// GetCloud gets the cloud this database is running on, or an empty string if it
 	// isn't running on a cloud provider.
 	GetCloud() string
+	// IsTokenAuthEnabled returns true if for a certain db token auth should be used instead of certificate auth
+	IsTokenAuthEnabled() bool
 }
 
 // NewDatabaseV3 creates a new database resource.
@@ -154,6 +156,10 @@ func NewDatabaseV3(meta Metadata, spec DatabaseSpecV3) (*DatabaseV3, error) {
 // GetVersion returns the database resource version.
 func (d *DatabaseV3) GetVersion() string {
 	return d.Version
+}
+
+func (d *DatabaseV3) IsTokenAuthEnabled() bool {
+	return d.Metadata.IsTokenAuthEnabled()
 }
 
 // GetKind returns the database resource kind.

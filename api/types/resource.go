@@ -451,6 +451,14 @@ func (m *Metadata) SetOrigin(origin string) {
 	m.Labels[OriginLabel] = origin
 }
 
+func (m *Metadata) IsTokenAuthEnabled() bool {
+	if m.Labels == nil {
+		return false
+	}
+	tokenAuthEnabled, _ := utils.ParseBool(m.Labels[TokenAuthEnabledLabel])
+	return tokenAuthEnabled
+}
+
 // CheckAndSetDefaults checks validity of all parameters and sets defaults
 func (m *Metadata) CheckAndSetDefaults() error {
 	if m.Name == "" {

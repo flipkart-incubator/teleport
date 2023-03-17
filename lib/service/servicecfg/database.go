@@ -15,6 +15,7 @@
 package servicecfg
 
 import (
+	"github.com/gravitational/teleport/lib/tokensource"
 	"strings"
 
 	"github.com/gravitational/trace"
@@ -42,6 +43,8 @@ type DatabasesConfig struct {
 	AzureMatchers []types.AzureMatcher
 	// Limiter limits the connection and request rates.
 	Limiter limiter.Config
+	// TokenConfig has http and authentication config for token exchange service
+	TokenSourceConfig tokensource.ClientConfig
 }
 
 // Database represents a single database that's being proxied.

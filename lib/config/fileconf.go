@@ -1828,6 +1828,19 @@ type Databases struct {
 	AWSMatchers []AWSMatcher `yaml:"aws,omitempty"`
 	// AzureMatchers match Azure hosted databases.
 	AzureMatchers []AzureMatcher `yaml:"azure,omitempty"`
+	// TokenSourceConfig has http and authentication config for token exchange service
+	TokenSourceConfig TokenSourceConfig `yaml:"token_source,omitempty"`
+}
+
+type TokenSourceConfig struct {
+	Enabled               types.BoolOption      `yaml:"enabled"`
+	UrlTemplate           string                `yaml:"url_template"`
+	Timeout               time.Duration         `yaml:"timeout"`
+	TokenSourceAuthConfig TokenSourceAuthConfig `yaml:"authentication"`
+}
+
+type TokenSourceAuthConfig struct {
+	Scheme string `yaml:"scheme,omitempty"`
 }
 
 // ResourceMatcher matches cluster resources.

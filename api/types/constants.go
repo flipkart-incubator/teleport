@@ -693,6 +693,10 @@ const (
 	// ConnectMyComputerNodeOwnerLabel is a label used to control access to the node managed by
 	// Teleport Connect as part of Connect My Computer. See [teleterm.connectmycomputer.RoleSetup].
 	ConnectMyComputerNodeOwnerLabel = TeleportNamespace + "/connect-my-computer/owner"
+
+	// TokenAuthEnabledLabel is used identify whether enable token based authentication instead of regular
+	// certificate based authentication
+	TokenAuthEnabledLabel = TeleportNamespace + "/token-auth-enabled"
 )
 
 var (

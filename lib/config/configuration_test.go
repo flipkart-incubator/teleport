@@ -4197,3 +4197,67 @@ func TestGetInstallerProxyAddr(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyFileConfig_DbTokenAuth_errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		scheme string
+		error  string
+	}{
+		{
+			name:   "empty url template",
+			url:    "",
+			scheme: "",
+			error:  "url template cannot be empty",
+		},
+		{
+			name:   "invalid url template",
+			url:    "{{User}}",
+			scheme: "",
+			error:  "\"User\" not defined",
+		},
+		{
+			name:   "invalid auth scheme",
+			url:    "{{.User}}",
+			scheme: "abcd",
+			error:  "no known token source authentication scheme abcd",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defaultCfg := servicecfg.MakeDefaultConfig()
+			err := ApplyFileConfig(&FileConfig{
+				Databases: Databases{
+					Service: Service{
+						EnabledFlag: "yes",
+					},
+					TokenSourceConfig: TokenSourceConfig{
+						Enabled:     types.BoolOption{Value: true},
+						UrlTemplate: test.url,
+						TokenSourceAuthConfig: TokenSourceAuthConfig{
+							Scheme: test.scheme,
+						},
+					},
+				},
+			}, defaultCfg)
+			require.ErrorContains(t, err, test.error)
+		})
+	}
+}
+
+func TestApplyFileConfig_DbTokenAuth(t *testing.T) {
+	defaultCfg := servicecfg.MakeDefaultConfig()
+	err := ApplyFileConfig(&FileConfig{
+		Databases: Databases{
+			Service: Service{
+				EnabledFlag: "yes",
+			},
+			TokenSourceConfig: TokenSourceConfig{
+				Enabled:     types.BoolOption{Value: true},
+				UrlTemplate: "http://localhost/{{.Database}}",
+			},
+		},
+	}, defaultCfg)
+	require.Nil(t, err)
+}
