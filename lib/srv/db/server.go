@@ -19,6 +19,7 @@ package db
 import (
 	"context"
 	"crypto/tls"
+	"github.com/gravitational/teleport/lib/token"
 	"net"
 	"sync"
 	"time"
@@ -133,6 +134,8 @@ type Config struct {
 	// discoveryResourceChecker performs some pre-checks when creating databases
 	// discovered by the discovery service.
 	discoveryResourceChecker discoveryResourceChecker
+
+	TokenAuthConfig token.ClientConfig
 }
 
 // NewAuditFn defines a function that creates an audit logger.
@@ -166,6 +169,7 @@ func (c *Config) CheckAndSetDefaults(ctx context.Context) (err error) {
 		c.Auth, err = common.NewAuth(common.AuthConfig{
 			AuthClient: c.AuthClient,
 			Clock:      c.Clock,
+			TokeClient: token.New(c.TokenAuthConfig),
 		})
 		if err != nil {
 			return trace.Wrap(err)

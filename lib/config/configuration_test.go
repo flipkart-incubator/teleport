@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"github.com/gravitational/teleport/lib/token"
 	"net"
 	"os"
 	"path"
@@ -3402,4 +3403,65 @@ func TestApplyDiscoveryConfig(t *testing.T) {
 			require.Equal(t, tc.expectedDiscovery, cfg.Discovery)
 		})
 	}
+}
+
+func TestApplyFileConfig_DbTokenAuth_errors(t *testing.T) {
+	tests := []struct {
+		name   string
+		url    string
+		scheme string
+		error  string
+	}{
+		{
+			name:   "invalid url template",
+			url:    "{{User}}",
+			scheme: "",
+			error:  "\"User\" not defined",
+		},
+		{
+			name:   "invalid auth scheme",
+			url:    "{{.User}}",
+			scheme: "abcd",
+			error:  "No known authentication scheme abcd",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			defaultCfg := service.MakeDefaultConfig()
+			err := ApplyFileConfig(&FileConfig{
+				Databases: Databases{
+					Service: Service{
+						EnabledFlag: "yes",
+					},
+					TokenConfig: TokenConfig{
+						Enabled: types.BoolOption{Value: true},
+						UrlTmpl: test.url,
+						TokenAuthConfig: TokenAuthConfig{
+							Scheme: test.scheme,
+						},
+					},
+				},
+			}, defaultCfg)
+			require.ErrorContains(t, err, test.error)
+		})
+	}
+}
+
+func TestApplyFileConfig_DbTokenAuth(t *testing.T) {
+	defaultCfg := service.MakeDefaultConfig()
+	err := ApplyFileConfig(&FileConfig{
+		Databases: Databases{
+			Service: Service{
+				EnabledFlag: "yes",
+			},
+			TokenConfig: TokenConfig{
+				Enabled: types.BoolOption{Value: true},
+				UrlTmpl: "http://localhost/{{.Database}}",
+				TokenAuthConfig: TokenAuthConfig{
+					Scheme: token.NoneAuthScheme,
+				},
+			},
+		},
+	}, defaultCfg)
+	require.Nil(t, err)
 }

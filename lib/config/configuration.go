@@ -22,6 +22,7 @@ package config
 
 import (
 	"crypto/x509"
+	"github.com/gravitational/teleport/lib/token"
 	"io"
 	stdlog "log"
 	"net"
@@ -30,6 +31,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"text/template"
 	"time"
 	"unicode"
 
@@ -1294,6 +1296,22 @@ func applyKubeConfig(fc *FileConfig, cfg *service.Config) error {
 // applyDatabasesConfig applies file configuration for the "db_service" section.
 func applyDatabasesConfig(fc *FileConfig, cfg *service.Config) error {
 	cfg.Databases.Enabled = true
+	tokenConfig := fc.Databases.TokenConfig
+	if tokenConfig.Enabled.Value {
+		var err error
+		cfg.Databases.TokenConfig.UrlTmpl, err = template.New("url").Parse(tokenConfig.UrlTmpl)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		cfg.Databases.TokenConfig.ReadTimeout = tokenConfig.ReadTimeout
+		cfg.Databases.TokenConfig.ConnectionTimeout = tokenConfig.ConnectionTimeout
+		if tokenConfig.TokenAuthConfig.Scheme != "" && token.AuthCreators[tokenConfig.TokenAuthConfig.Scheme] == nil {
+			return trace.Errorf("No known authentication scheme %s", tokenConfig.TokenAuthConfig.Scheme)
+		}
+		cfg.Databases.TokenConfig.AuthConfig = token.AuthConfig{
+			Scheme: tokenConfig.TokenAuthConfig.Scheme,
+		}
+	}
 	for _, matcher := range fc.Databases.ResourceMatchers {
 		cfg.Databases.ResourceMatchers = append(cfg.Databases.ResourceMatchers,
 			services.ResourceMatcher{

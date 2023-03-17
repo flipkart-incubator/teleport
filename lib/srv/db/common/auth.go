@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"github.com/gravitational/teleport/lib/token"
 	"io"
 	"strings"
 	"time"
@@ -84,6 +85,8 @@ type Auth interface {
 	// attached to the current compute instance. If Teleport is not running on
 	// Azure VM returns an error.
 	GetAzureIdentityResourceID(ctx context.Context, identityName string) (string, error)
+
+	GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error)
 	// Closer releases all resources used by authenticator.
 	io.Closer
 }
@@ -104,6 +107,8 @@ type AuthConfig struct {
 	AuthClient AuthClient
 	// Clients provides interface for obtaining cloud provider clients.
 	Clients cloud.Clients
+	// TokenClient
+	TokeClient *token.Client
 	// Clock is the clock implementation.
 	Clock clockwork.Clock
 	// Log is used for logging.
@@ -498,6 +503,12 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 		return tlsConfig, nil
 	}
 
+	// When connecting to onprem database but if token auth is enabled
+	// auth happens via token so don't generate client cert
+	if sessionCtx.Database.IsTokenAuthEnabled() {
+		return tlsConfig, nil
+	}
+
 	// Otherwise, when connecting to an onprem database, generate a client
 	// certificate. The database instance should be configured with
 	// Teleport's CA obtained with 'tctl auth sign --type=db'.
@@ -773,6 +784,14 @@ func (a *dbAuth) getCurrentAzureVM(ctx context.Context) (*libazure.VirtualMachin
 	}
 
 	return vm, nil
+}
+
+// GetTokenAuthCredentials exchanges username/token and exchanges it with actual username and password
+func (a *dbAuth) GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error) {
+	if a.cfg.TokeClient == nil {
+		return "", "", trace.Errorf("token client is not initialized")
+	}
+	return a.cfg.TokeClient.GetTokenAuthCredentials(ctx, sessionCtx.Database.GetMetadata().Name, sessionCtx.Identity.Username, sessionCtx.DatabaseUser)
 }
 
 // Close releases all resources used by authenticator.
