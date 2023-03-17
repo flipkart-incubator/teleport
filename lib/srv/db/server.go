@@ -169,7 +169,7 @@ func (c *Config) CheckAndSetDefaults(ctx context.Context) (err error) {
 		c.Auth, err = common.NewAuth(common.AuthConfig{
 			AuthClient: c.AuthClient,
 			Clock:      c.Clock,
-			TokeClient: token.New(c.TokenAuthConfig),
+			TokeClient: token.NewClient(c.TokenAuthConfig),
 		})
 		if err != nil {
 			return trace.Wrap(err)

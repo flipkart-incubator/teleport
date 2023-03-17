@@ -21,7 +21,7 @@ func TestNewClient(t *testing.T) {
 		{scheme: "abcd", expectedInjector: NoAuthInjector{}},
 	}
 	for _, tc := range testCases {
-		client := New(ClientConfig{
+		client := NewClient(ClientConfig{
 			UrlTmpl:           template.New("abcd"),
 			ReadTimeout:       1 * time.Second,
 			ConnectionTimeout: 1 * time.Second,
@@ -115,7 +115,7 @@ func TestGetTokenAuthCredentialsFailures(t *testing.T) {
 				t.Errorf("error while creating template: %s", tc.urlTmpl)
 				return
 			}
-			client := New(ClientConfig{
+			client := NewClient(ClientConfig{
 				UrlTmpl:           tmpl,
 				ReadTimeout:       1 * time.Second,
 				ConnectionTimeout: 1 * time.Second,
@@ -147,7 +147,7 @@ func TestGetTokenAuthCredentialsSuccess(t *testing.T) {
 		t.Errorf("error while creating template: %s", server.URL)
 		return
 	}
-	client := New(ClientConfig{
+	client := NewClient(ClientConfig{
 		UrlTmpl:           tmpl,
 		ReadTimeout:       1 * time.Second,
 		ConnectionTimeout: 1 * time.Second,

@@ -46,7 +46,7 @@ type urlTmplParams struct {
 	Username string
 }
 
-func New(config ClientConfig) *Client {
+func NewClient(config ClientConfig) *Client {
 	dialer := net.Dialer{
 		Timeout: config.ConnectionTimeout, // Connect Timeout
 	}
