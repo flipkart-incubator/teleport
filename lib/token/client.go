@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	tracehttp "github.com/gravitational/teleport/api/observability/tracing/http"
 	"github.com/gravitational/trace"
 	"io"
 	"net"
@@ -20,9 +21,9 @@ type Client struct {
 }
 
 type ClientConfig struct {
-	UrlTmpl                        *template.Template
-	ReadTimeout, ConnectionTimeout time.Duration
-	AuthConfig                     AuthConfig
+	UrlTmpl                         *template.Template
+	TotalTimeout, ConnectionTimeout time.Duration
+	AuthConfig                      AuthConfig
 }
 
 type AuthConfig struct {
@@ -57,14 +58,15 @@ func NewClient(config ClientConfig) *Client {
 	if scheme != "" && AuthCreators[scheme] != nil {
 		authInjector = AuthCreators[scheme](config.AuthConfig)
 	}
+	transport := http.Transport{
+		DialContext: dialer.DialContext,
+	}
 	return &Client{
 		urlTemplate: config.UrlTmpl,
 		httpClient: http.Client{
-			Transport: &http.Transport{
-				DialContext: dialer.DialContext,
-			},
+			Transport: tracehttp.NewTransport(&transport),
+			Timeout:   config.TotalTimeout,
 		},
-		timeout:      config.ReadTimeout,
 		authInjector: authInjector,
 	}
 }
@@ -92,16 +94,13 @@ func (c *Client) doRequest(ctx context.Context, url string) (CredentialResponse,
 		return credentialResponse, trace.Wrap(err)
 	}
 
-	timeoutContext, cancelFunction := context.WithTimeout(ctx, c.timeout)
-	defer cancelFunction()
-
 	err = c.authInjector.injectAuth(request)
 	if err != nil {
 		return credentialResponse, trace.Wrap(err)
 	}
 
 	/* Execute Request */
-	response, err := c.httpClient.Do(request.WithContext(timeoutContext))
+	response, err := c.httpClient.Do(request.WithContext(ctx))
 	if err != nil {
 		return credentialResponse, trace.Wrap(err)
 	}

@@ -1548,7 +1548,7 @@ type TokenConfig struct {
 	Enabled           types.BoolOption `yaml:"enabled"`
 	UrlTmpl           string           `yaml:"url_tmpl"`
 	ConnectionTimeout time.Duration    `yaml:"connection_timeout"`
-	ReadTimeout       time.Duration    `yaml:"read_timeout"`
+	TotalTimeout      time.Duration    `yaml:"total_timeout"`
 	TokenAuthConfig   TokenAuthConfig  `yaml:"authentication"`
 }
 

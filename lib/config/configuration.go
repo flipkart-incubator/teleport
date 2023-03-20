@@ -1303,7 +1303,7 @@ func applyDatabasesConfig(fc *FileConfig, cfg *service.Config) error {
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		cfg.Databases.TokenConfig.ReadTimeout = tokenConfig.ReadTimeout
+		cfg.Databases.TokenConfig.TotalTimeout = tokenConfig.TotalTimeout
 		cfg.Databases.TokenConfig.ConnectionTimeout = tokenConfig.ConnectionTimeout
 		if tokenConfig.TokenAuthConfig.Scheme != "" && token.AuthCreators[tokenConfig.TokenAuthConfig.Scheme] == nil {
 			return trace.Errorf("No known authentication scheme %s", tokenConfig.TokenAuthConfig.Scheme)

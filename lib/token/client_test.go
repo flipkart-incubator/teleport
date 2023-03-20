@@ -23,7 +23,7 @@ func TestNewClient(t *testing.T) {
 	for _, tc := range testCases {
 		client := NewClient(ClientConfig{
 			UrlTmpl:           template.New("abcd"),
-			ReadTimeout:       1 * time.Second,
+			TotalTimeout:      1 * time.Second,
 			ConnectionTimeout: 1 * time.Second,
 			AuthConfig: AuthConfig{
 				Scheme: tc.scheme,
@@ -117,7 +117,7 @@ func TestGetTokenAuthCredentialsFailures(t *testing.T) {
 			}
 			client := NewClient(ClientConfig{
 				UrlTmpl:           tmpl,
-				ReadTimeout:       1 * time.Second,
+				TotalTimeout:      1 * time.Second,
 				ConnectionTimeout: 1 * time.Second,
 				AuthConfig: AuthConfig{
 					Scheme: tc.scheme,
@@ -149,7 +149,7 @@ func TestGetTokenAuthCredentialsSuccess(t *testing.T) {
 	}
 	client := NewClient(ClientConfig{
 		UrlTmpl:           tmpl,
-		ReadTimeout:       1 * time.Second,
+		TotalTimeout:      1 * time.Second,
 		ConnectionTimeout: 1 * time.Second,
 		AuthConfig: AuthConfig{
 			Scheme: NoneAuthScheme,
