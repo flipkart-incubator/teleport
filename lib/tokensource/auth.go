@@ -1,6 +1,8 @@
-package token
+package tokensource
 
-import "net/http"
+import (
+	"github.com/go-resty/resty/v2"
+)
 
 const (
 	NoneAuthScheme = "NONE"
@@ -17,14 +19,13 @@ func init() {
 }
 
 type AuthInjector interface {
-	injectAuth(request *http.Request) error
+	injectAuth(c *resty.Client)
 }
 
 type NoAuthInjector struct {
 }
 
-func (i NoAuthInjector) injectAuth(r *http.Request) error {
-	return nil
+func (i NoAuthInjector) injectAuth(c *resty.Client) {
 }
 
 func newNoAuthInjector(config AuthConfig) AuthInjector {

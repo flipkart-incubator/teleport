@@ -22,7 +22,8 @@ package config
 
 import (
 	"crypto/x509"
-	"github.com/gravitational/teleport/lib/token"
+	"github.com/gravitational/teleport/lib/tokensource"
+	"golang.org/x/exp/maps"
 	"io"
 	stdlog "log"
 	"net"
@@ -1296,21 +1297,24 @@ func applyKubeConfig(fc *FileConfig, cfg *service.Config) error {
 // applyDatabasesConfig applies file configuration for the "db_service" section.
 func applyDatabasesConfig(fc *FileConfig, cfg *service.Config) error {
 	cfg.Databases.Enabled = true
-	tokenConfig := fc.Databases.TokenConfig
+	tokenConfig := fc.Databases.TokenSourceConfig
 	if tokenConfig.Enabled.Value {
 		var err error
-		cfg.Databases.TokenConfig.UrlTmpl, err = template.New("url").Parse(tokenConfig.UrlTmpl)
+		cfg.Databases.TokenSourceConfig.Enabled = tokenConfig.Enabled.Value
+		if tokenConfig.UrlTemplate == "" {
+			return trace.Errorf("token source url template cannot be empty")
+		}
+		cfg.Databases.TokenSourceConfig.UrlTemplate, err = template.New("url").Parse(tokenConfig.UrlTemplate)
 		if err != nil {
 			return trace.Wrap(err)
 		}
-		cfg.Databases.TokenConfig.TotalTimeout = tokenConfig.TotalTimeout
-		cfg.Databases.TokenConfig.ConnectionTimeout = tokenConfig.ConnectionTimeout
-		if tokenConfig.TokenAuthConfig.Scheme != "" && token.AuthCreators[tokenConfig.TokenAuthConfig.Scheme] == nil {
-			return trace.Errorf("No known authentication scheme %s", tokenConfig.TokenAuthConfig.Scheme)
+		cfg.Databases.TokenSourceConfig.Timeout = tokenConfig.Timeout
+		if tokenConfig.TokenSourceAuthConfig.Scheme != "" && tokensource.AuthCreators[tokenConfig.TokenSourceAuthConfig.Scheme] == nil {
+			return trace.Errorf("no known token source authentication scheme %s, valid values are %v", tokenConfig.TokenSourceAuthConfig.Scheme, maps.Keys(tokensource.AuthCreators))
 		}
-		cfg.Databases.TokenConfig.AuthConfig = token.AuthConfig{
-			Scheme: tokenConfig.TokenAuthConfig.Scheme,
-		}
+		cfg.Databases.TokenSourceConfig.AuthConfig.Scheme = tokenConfig.TokenSourceAuthConfig.Scheme
+
+		cfg.Databases.TokenSourceConfig.CheckAndSetDefaults()
 	}
 	for _, matcher := range fc.Databases.ResourceMatchers {
 		cfg.Databases.ResourceMatchers = append(cfg.Databases.ResourceMatchers,

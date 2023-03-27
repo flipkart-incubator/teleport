@@ -22,7 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"github.com/gravitational/teleport/lib/token"
+	"github.com/gravitational/teleport/lib/tokensource"
 	"io"
 	"strings"
 	"time"
@@ -86,6 +86,7 @@ type Auth interface {
 	// Azure VM returns an error.
 	GetAzureIdentityResourceID(ctx context.Context, identityName string) (string, error)
 
+	IsTokenAuthEnabled() bool
 	GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error)
 	// Closer releases all resources used by authenticator.
 	io.Closer
@@ -107,8 +108,8 @@ type AuthConfig struct {
 	AuthClient AuthClient
 	// Clients provides interface for obtaining cloud provider clients.
 	Clients cloud.Clients
-	// TokenClient
-	TokeClient *token.Client
+	// TokenSourceClient
+	TokenSourceClient *tokensource.Client
 	// Clock is the clock implementation.
 	Clock clockwork.Clock
 	// Log is used for logging.
@@ -505,7 +506,7 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 
 	// When connecting to onprem database but if token auth is enabled
 	// auth happens via token so don't generate client cert
-	if sessionCtx.Database.IsTokenAuthEnabled() {
+	if a.IsTokenAuthEnabled() && sessionCtx.Database.IsTokenAuthEnabled() {
 		return tlsConfig, nil
 	}
 
@@ -786,12 +787,13 @@ func (a *dbAuth) getCurrentAzureVM(ctx context.Context) (*libazure.VirtualMachin
 	return vm, nil
 }
 
+func (a *dbAuth) IsTokenAuthEnabled() bool {
+	return a.cfg.TokenSourceClient != nil
+}
+
 // GetTokenAuthCredentials exchanges username/token and exchanges it with actual username and password
 func (a *dbAuth) GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error) {
-	if a.cfg.TokeClient == nil {
-		return "", "", trace.Errorf("token client is not initialized")
-	}
-	return a.cfg.TokeClient.GetTokenAuthCredentials(ctx, sessionCtx.Database.GetMetadata().Name, sessionCtx.Identity.Username, sessionCtx.DatabaseUser)
+	return a.cfg.TokenSourceClient.GetCredentials(ctx, sessionCtx.Database.GetMetadata().Name, sessionCtx.Identity.Username, sessionCtx.DatabaseUser)
 }
 
 // Close releases all resources used by authenticator.
