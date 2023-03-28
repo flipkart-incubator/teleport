@@ -3,6 +3,7 @@ package tokensource
 import (
 	"context"
 	"fmt"
+	"github.com/gravitational/teleport/api/defaults"
 	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
@@ -11,8 +12,7 @@ import (
 	"time"
 )
 
-// TestGetTokenAuthCredentialsFailures cannot test http body read error because not sure how to simulate it
-// Not testing injector because there is only one injector and it does not throw any error
+// TestGetTokenAuthCredentialsFailures not testing injector because there is only one injector and it does not throw any error
 func TestGetTokenAuthCredentialsFailures(t *testing.T) {
 	resp := &struct {
 		status   int
@@ -40,7 +40,7 @@ func TestGetTokenAuthCredentialsFailures(t *testing.T) {
 			scheme:   NoneAuthScheme,
 			httpStat: 200,
 			httpResp: "{}",
-			error:    "can't evaluate field User in type token.urlTmplParams",
+			error:    "can't evaluate field User in type tokensource.urlTmplParams",
 		},
 		{
 			name:     "400 error",
@@ -102,4 +102,49 @@ func TestGetTokenAuthCredentialsSuccess(t *testing.T) {
 	require.Equal(t, expUser, user)
 	require.Equal(t, expPass, pass)
 	require.Nil(t, err)
+}
+
+func TestCheckAndSetDefaults(t *testing.T) {
+	tests := []struct {
+		name          string
+		timeout       time.Duration
+		authScheme    string
+		expTimeout    time.Duration
+		expAuthScheme string
+	}{
+		{
+			name:          "all defaults",
+			timeout:       0,
+			authScheme:    "",
+			expTimeout:    defaults.DefaultIOTimeout,
+			expAuthScheme: DefaultAuthScheme,
+		},
+		{
+			name:          "default timeout",
+			timeout:       0,
+			authScheme:    "NONE",
+			expTimeout:    defaults.DefaultIOTimeout,
+			expAuthScheme: "NONE",
+		},
+		{
+			name:          "default auth scheme",
+			timeout:       1 * time.Second,
+			authScheme:    "",
+			expTimeout:    1 * time.Second,
+			expAuthScheme: DefaultAuthScheme,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := ClientConfig{
+				Timeout: test.timeout,
+				AuthConfig: AuthConfig{
+					Scheme: test.authScheme,
+				},
+			}
+			config.CheckAndSetDefaults()
+			require.Equal(t, test.expTimeout, config.Timeout)
+			require.Equal(t, test.expAuthScheme, config.AuthConfig.Scheme)
+		})
+	}
 }

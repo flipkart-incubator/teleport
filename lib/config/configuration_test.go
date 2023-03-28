@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"github.com/gravitational/teleport/lib/tokensource"
 	"net"
 	"os"
 	"path"
@@ -3454,56 +3453,17 @@ func TestApplyFileConfig_DbTokenAuth_errors(t *testing.T) {
 }
 
 func TestApplyFileConfig_DbTokenAuth(t *testing.T) {
-	tests := []struct {
-		name          string
-		timeout       time.Duration
-		authScheme    string
-		expTimeout    time.Duration
-		expAuthScheme string
-	}{
-		{
-			name:          "all defaults",
-			timeout:       0,
-			authScheme:    "",
-			expTimeout:    apidefaults.DefaultIOTimeout,
-			expAuthScheme: tokensource.DefaultAuthScheme,
+	defaultCfg := service.MakeDefaultConfig()
+	err := ApplyFileConfig(&FileConfig{
+		Databases: Databases{
+			Service: Service{
+				EnabledFlag: "yes",
+			},
+			TokenSourceConfig: TokenSourceConfig{
+				Enabled:     types.BoolOption{Value: true},
+				UrlTemplate: "http://localhost/{{.Database}}",
+			},
 		},
-		{
-			name:          "default timeout",
-			timeout:       0,
-			authScheme:    "NONE",
-			expTimeout:    apidefaults.DefaultIOTimeout,
-			expAuthScheme: "NONE",
-		},
-		{
-			name:          "default auth scheme",
-			timeout:       1 * time.Second,
-			authScheme:    "",
-			expTimeout:    1 * time.Second,
-			expAuthScheme: tokensource.DefaultAuthScheme,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			defaultCfg := service.MakeDefaultConfig()
-			err := ApplyFileConfig(&FileConfig{
-				Databases: Databases{
-					Service: Service{
-						EnabledFlag: "yes",
-					},
-					TokenSourceConfig: TokenSourceConfig{
-						Enabled:     types.BoolOption{Value: true},
-						Timeout:     test.timeout,
-						UrlTemplate: "http://localhost/{{.Database}}",
-						TokenSourceAuthConfig: TokenSourceAuthConfig{
-							Scheme: test.authScheme,
-						},
-					},
-				},
-			}, defaultCfg)
-			require.Equal(t, test.expTimeout, defaultCfg.Databases.TokenSourceConfig.Timeout)
-			require.Equal(t, test.expAuthScheme, defaultCfg.Databases.TokenSourceConfig.AuthConfig.Scheme)
-			require.Nil(t, err)
-		})
-	}
+	}, defaultCfg)
+	require.Nil(t, err)
 }

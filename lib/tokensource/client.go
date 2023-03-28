@@ -52,6 +52,8 @@ func NewClient(config ClientConfig) *Client {
 		return nil
 	}
 
+	config.CheckAndSetDefaults()
+
 	client := resty.New().
 		SetTransport(tracehttp.NewTransport(http.DefaultTransport)).
 		SetTimeout(config.Timeout)
@@ -68,11 +70,10 @@ func NewClient(config ClientConfig) *Client {
 }
 
 func (c *Client) GetCredentials(ctx context.Context, dbName, username, token string) (string, string, error) {
-	buf := &bytes.Buffer{}
-	if err := c.urlTemplate.Execute(buf, urlTmplParams{DBName: dbName, Token: token, Username: username}); err != nil {
+	url, err := c.buildUrl(dbName, username, token)
+	if err != nil {
 		return "", "", trace.Wrap(err)
 	}
-	url := buf.String()
 
 	resp, err := c.httpClient.R().
 		SetContext(ctx).
@@ -90,6 +91,14 @@ func (c *Client) GetCredentials(ctx context.Context, dbName, username, token str
 		errorResp := resp.Error().(*CredentialResponse)
 		return "", "", trace.Errorf("%v: %v", errorResp.Code, errorResp.Msg)
 	}
+}
+
+func (c *Client) buildUrl(dbName, username, token string) (string, error) {
+	buf := &bytes.Buffer{}
+	if err := c.urlTemplate.Execute(buf, urlTmplParams{DBName: dbName, Token: token, Username: username}); err != nil {
+		return "", trace.Wrap(err)
+	}
+	return buf.String(), nil
 }
 
 func (c *ClientConfig) CheckAndSetDefaults() {

@@ -1313,8 +1313,6 @@ func applyDatabasesConfig(fc *FileConfig, cfg *service.Config) error {
 			return trace.Errorf("no known token source authentication scheme %s, valid values are %v", tokenConfig.TokenSourceAuthConfig.Scheme, maps.Keys(tokensource.AuthCreators))
 		}
 		cfg.Databases.TokenSourceConfig.AuthConfig.Scheme = tokenConfig.TokenSourceAuthConfig.Scheme
-
-		cfg.Databases.TokenSourceConfig.CheckAndSetDefaults()
 	}
 	for _, matcher := range fc.Databases.ResourceMatchers {
 		cfg.Databases.ResourceMatchers = append(cfg.Databases.ResourceMatchers,
