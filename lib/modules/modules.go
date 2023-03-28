@@ -162,6 +162,7 @@ func (p *defaultModules) Features() Features {
 		DB:         true,
 		App:        true,
 		Desktop:    true,
+		OIDC:       true,
 	}
 }
 

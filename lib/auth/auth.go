@@ -294,6 +294,14 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 	if as.clock == nil {
 		as.clock = clockwork.NewRealClock()
 	}
+	oas, err := NewOIDCAuthService(&OIDCAuthServiceConfig{
+		Auth:    &as,
+		Emitter: as.emitter,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	as.SetOIDCService(oas)
 	as.githubOrgSSOCache, err = utils.NewFnCache(utils.FnCacheConfig{
 		TTL: githubCacheTimeout,
 	})
