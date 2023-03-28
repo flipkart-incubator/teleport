@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/gravitational/teleport/lib/tokensource"
 	"io"
 	"net"
 	"net/http"
@@ -822,6 +823,8 @@ type DatabasesConfig struct {
 	AzureMatchers []services.AzureMatcher
 	// Limiter limits the connection and request rates.
 	Limiter limiter.Config
+	// TokenSourceConfig has http and authentication config for token exchange service
+	TokenSourceConfig tokensource.ClientConfig
 }
 
 // Database represents a single database that's being proxied.

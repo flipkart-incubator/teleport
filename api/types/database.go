@@ -116,6 +116,8 @@ type Database interface {
 	RequireAWSIAMRolesAsUsers() bool
 	// Copy returns a copy of this database resource.
 	Copy() *DatabaseV3
+	// IsTokenAuthEnabled returns true if for a certain db token auth should be used instead of certificate auth
+	IsTokenAuthEnabled() bool
 }
 
 // NewDatabaseV3 creates a new database resource.
@@ -133,6 +135,10 @@ func NewDatabaseV3(meta Metadata, spec DatabaseSpecV3) (*DatabaseV3, error) {
 // GetVersion returns the database resource version.
 func (d *DatabaseV3) GetVersion() string {
 	return d.Version
+}
+
+func (d *DatabaseV3) IsTokenAuthEnabled() bool {
+	return d.Metadata.IsTokenAuthEnabled()
 }
 
 // GetKind returns the database resource kind.

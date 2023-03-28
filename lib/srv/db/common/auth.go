@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"github.com/gravitational/teleport/lib/tokensource"
 	"io"
 	"strings"
 	"time"
@@ -84,6 +85,9 @@ type Auth interface {
 	// attached to the current compute instance. If Teleport is not running on
 	// Azure VM returns an error.
 	GetAzureIdentityResourceID(ctx context.Context, identityName string) (string, error)
+
+	IsTokenAuthEnabled() bool
+	GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error)
 	// Closer releases all resources used by authenticator.
 	io.Closer
 }
@@ -104,6 +108,8 @@ type AuthConfig struct {
 	AuthClient AuthClient
 	// Clients provides interface for obtaining cloud provider clients.
 	Clients cloud.Clients
+	// TokenSourceClient
+	TokenSourceClient *tokensource.Client
 	// Clock is the clock implementation.
 	Clock clockwork.Clock
 	// Log is used for logging.
@@ -498,6 +504,12 @@ func (a *dbAuth) getTLSConfigVerifyFull(ctx context.Context, sessionCtx *Session
 		return tlsConfig, nil
 	}
 
+	// When connecting to onprem database but if token auth is enabled
+	// auth happens via token so don't generate client cert
+	if a.IsTokenAuthEnabled() && sessionCtx.Database.IsTokenAuthEnabled() {
+		return tlsConfig, nil
+	}
+
 	// Otherwise, when connecting to an onprem database, generate a client
 	// certificate. The database instance should be configured with
 	// Teleport's CA obtained with 'tctl auth sign --type=db'.
@@ -773,6 +785,15 @@ func (a *dbAuth) getCurrentAzureVM(ctx context.Context) (*libazure.VirtualMachin
 	}
 
 	return vm, nil
+}
+
+func (a *dbAuth) IsTokenAuthEnabled() bool {
+	return a.cfg.TokenSourceClient != nil
+}
+
+// GetTokenAuthCredentials exchanges username/token and exchanges it with actual username and password
+func (a *dbAuth) GetTokenAuthCredentials(ctx context.Context, sessionCtx *Session) (string, string, error) {
+	return a.cfg.TokenSourceClient.GetCredentials(ctx, sessionCtx.Database.GetMetadata().Name, sessionCtx.Identity.Username, sessionCtx.DatabaseUser)
 }
 
 // Close releases all resources used by authenticator.

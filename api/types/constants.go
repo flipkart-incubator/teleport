@@ -448,6 +448,10 @@ const (
 
 	// TeleportAzureMSIEndpoint is a special URL intercepted by TSH local proxy, serving Azure credentials.
 	TeleportAzureMSIEndpoint = "azure-msi." + TeleportNamespace
+
+	// TokenAuthEnabledLabel is used identify whether enable token based authentication instead of regular
+	// certificate based authentication
+	TokenAuthEnabledLabel = TeleportNamespace + "/token-auth-enabled"
 )
 
 // CloudHostnameTag is the name of the tag in a cloud instance used to override a node's hostname.
