@@ -158,9 +158,6 @@ func marshalGithubConnector(githubConnector types.GithubConnector, opts ...Marsh
 
 	switch githubConnector := githubConnector.(type) {
 	case *types.GithubConnectorV3:
-		if githubConnector.Spec.EndpointURL != "" {
-			return nil, ErrRequiresEnterprise
-		}
 
 		if !cfg.PreserveResourceID {
 			// avoid modifying the original object

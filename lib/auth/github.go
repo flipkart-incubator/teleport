@@ -876,13 +876,13 @@ type githubAPIClient struct {
 // userResponse represents response from "user" API call
 type userResponse struct {
 	// Login is the username
-	Login string `json:"login"`
+	Login string `json:"sub"`
 }
 
 // getEmails retrieves a list of emails for authenticated user
 func (c *githubAPIClient) getUser() (*userResponse, error) {
 	// Ignore pagination links, we should never get more than a single user here.
-	bytes, _, err := c.get("user")
+	bytes, _, err := c.get("oauth/r/api/v1/user/details")
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -912,69 +912,14 @@ type orgResponse struct {
 
 // getTeams retrieves a list of teams authenticated user belongs to.
 func (c *githubAPIClient) getTeams() ([]teamResponse, error) {
-	var result []teamResponse
-
-	bytes, nextPage, err := c.get("user/teams")
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	// Extract the first page of results and append them to the full result set.
-	var teams []teamResponse
-	err = json.Unmarshal(bytes, &teams)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	result = append(result, teams...)
-
-	// If the response returned a next page link, continue following the next
-	// page links until all teams have been retrieved.
-	var count int
-	for nextPage != "" {
-		// To prevent this from looping forever, don't fetch more than a set number
-		// of pages, print an error when it does happen, and return the results up
-		// to that point.
-		if count > MaxPages {
-			warningMessage := "Truncating list of teams used to populate claims: " +
-				"hit maximum number pages that can be fetched from GitHub."
-
-			// Print warning to Teleport logs as well as the Audit Log.
-			log.Warnf(warningMessage)
-			if err := c.authServer.emitter.EmitAuditEvent(c.authServer.closeCtx, &apievents.UserLogin{
-				Metadata: apievents.Metadata{
-					Type: events.UserLoginEvent,
-					Code: events.UserSSOLoginFailureCode,
-				},
-				Method: events.LoginMethodGithub,
-				Status: apievents.Status{
-					Success: false,
-					Error:   warningMessage,
-				},
-			}); err != nil {
-				log.WithError(err).Warn("Failed to emit GitHub login failure event.")
-			}
-			return result, nil
-		}
-
-		u, err := url.Parse(nextPage)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-
-		bytes, nextPage, err = c.get(u.RequestURI())
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-
-		err = json.Unmarshal(bytes, &teams)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-
-		// Append this page of teams to full result set.
-		result = append(result, teams...)
-
-		count = count + 1
+	result := []teamResponse{
+		{
+			Name: "dummy",
+			Org: orgResponse{
+				Login: "Flipkart",
+			},
+			Slug: "dummy",
+		},
 	}
 
 	return result, nil
@@ -986,7 +931,7 @@ func (c *githubAPIClient) get(page string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", trace.Wrap(err)
 	}
-	request.Header.Set("Authorization", fmt.Sprintf("token %v", c.token))
+	request.Header.Set("Authorization", fmt.Sprintf("Bearer %v", c.token))
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return nil, "", trace.Wrap(err)
@@ -1015,10 +960,10 @@ func formatGithubURL(host string, path string) string {
 
 const (
 	// GithubAuthPath is the GitHub authorization endpoint
-	GithubAuthPath = "login/oauth/authorize"
+	GithubAuthPath = "oauth/authorize"
 
 	// GithubTokenPath is the GitHub token exchange endpoint
-	GithubTokenPath = "login/oauth/access_token"
+	GithubTokenPath = "oauth/token"
 
 	// MaxPages is the maximum number of pagination links that will be followed.
 	MaxPages = 99
@@ -1027,5 +972,5 @@ const (
 // GithubScopes is a list of scopes requested during OAuth2 flow
 var GithubScopes = []string{
 	// read:org grants read-only access to user's team memberships
-	"read:org",
+	"user.profile",
 }

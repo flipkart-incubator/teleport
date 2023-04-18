@@ -279,12 +279,12 @@ func (c *GithubConnectorV3) SetDisplay(display string) {
 
 // GetEndpointURL returns the endpoint URL
 func (c *GithubConnectorV3) GetEndpointURL() string {
-	return GithubURL
+	return c.Spec.EndpointURL
 }
 
 // GetEndpointURL returns the API endpoint URL
 func (c *GithubConnectorV3) GetAPIEndpointURL() string {
-	return GithubAPIURL
+	return c.Spec.APIEndpointURL
 }
 
 // MapClaims returns a list of logins based on the provided claims,
