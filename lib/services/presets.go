@@ -81,6 +81,10 @@ func NewPresetEditorRole() types.Role {
 					types.NewRule(types.KindLoginRule, RW()),
 					types.NewRule(types.KindSAMLIdPServiceProvider, RW()),
 					types.NewRule(types.KindUserGroup, RW()),
+					types.NewRule(types.KindOktaImportRule, RW()),
+					types.NewRule(types.KindOktaAssignment, RW()),
+					types.NewRule(types.KindPlugin, RW()),
+					types.NewRule(types.KindIntegration, append(RW(), types.VerbUse)),
 					// Please see defaultAllowRules when adding a new rule.
 				},
 			},
@@ -197,6 +201,10 @@ func defaultAllowRules() map[string][]types.Rule {
 			types.NewRule(types.KindDatabaseService, RO()),
 			types.NewRule(types.KindLoginRule, RW()),
 			types.NewRule(types.KindSAMLIdPServiceProvider, RW()),
+			types.NewRule(types.KindOktaImportRule, RW()),
+			types.NewRule(types.KindOktaAssignment, RW()),
+			types.NewRule(types.KindPlugin, RW()),
+			types.NewRule(types.KindIntegration, append(RW(), types.VerbUse)),
 		},
 	}
 }

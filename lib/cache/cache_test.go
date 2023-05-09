@@ -85,6 +85,8 @@ type testPack struct {
 	windowsDesktops         services.WindowsDesktops
 	samlIDPServiceProviders services.SAMLIdPServiceProviders
 	userGroups              services.UserGroups
+	okta                    services.Okta
+	integrations            services.Integrations
 }
 
 func (t *testPack) Close() {
@@ -204,7 +206,21 @@ func newPackWithoutCache(dir string, opts ...packOption) (*testPack, error) {
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	p.userGroups = local.NewUserGroupService(p.backend)
+	p.userGroups, err = local.NewUserGroupService(p.backend)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	oktaSvc, err := local.NewOktaService(p.backend, p.backend.Clock())
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	p.okta = oktaSvc
+
+	igSvc, err := local.NewIntegrationsService(p.backend)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	p.integrations = igSvc
 
 	return p, nil
 }
@@ -241,6 +257,8 @@ func newPack(dir string, setupConfig func(c Config) Config, opts ...packOption) 
 		WindowsDesktops:         p.windowsDesktops,
 		SAMLIdPServiceProviders: p.samlIDPServiceProviders,
 		UserGroups:              p.userGroups,
+		Okta:                    p.okta,
+		Integrations:            p.integrations,
 		MaxRetryPeriod:          200 * time.Millisecond,
 		EventsC:                 p.eventsC,
 	}))
@@ -627,6 +645,8 @@ func TestCompletenessInit(t *testing.T) {
 			WindowsDesktops:         p.windowsDesktops,
 			SAMLIdPServiceProviders: p.samlIDPServiceProviders,
 			UserGroups:              p.userGroups,
+			Okta:                    p.okta,
+			Integrations:            p.integrations,
 			MaxRetryPeriod:          200 * time.Millisecond,
 			EventsC:                 p.eventsC,
 		}))
@@ -693,6 +713,8 @@ func TestCompletenessReset(t *testing.T) {
 		WindowsDesktops:         p.windowsDesktops,
 		SAMLIdPServiceProviders: p.samlIDPServiceProviders,
 		UserGroups:              p.userGroups,
+		Okta:                    p.okta,
+		Integrations:            p.integrations,
 		MaxRetryPeriod:          200 * time.Millisecond,
 		EventsC:                 p.eventsC,
 	}))
@@ -871,6 +893,8 @@ func TestListResources_NodesTTLVariant(t *testing.T) {
 		WindowsDesktops:         p.windowsDesktops,
 		SAMLIdPServiceProviders: p.samlIDPServiceProviders,
 		UserGroups:              p.userGroups,
+		Okta:                    p.okta,
+		Integrations:            p.integrations,
 		MaxRetryPeriod:          200 * time.Millisecond,
 		EventsC:                 p.eventsC,
 		neverOK:                 true, // ensure reads are never healthy
@@ -947,6 +971,8 @@ func initStrategy(t *testing.T) {
 		WindowsDesktops:         p.windowsDesktops,
 		SAMLIdPServiceProviders: p.samlIDPServiceProviders,
 		UserGroups:              p.userGroups,
+		Okta:                    p.okta,
+		Integrations:            p.integrations,
 		MaxRetryPeriod:          200 * time.Millisecond,
 		EventsC:                 p.eventsC,
 	}))
@@ -1668,7 +1694,7 @@ func TestNodes(t *testing.T) {
 	// update keep alive on the node and make sure
 	// it propagates
 	lease.Expires = time.Now().UTC().Add(time.Hour)
-	err = p.presenceS.KeepAliveNode(ctx, *lease)
+	err = p.presenceS.KeepAliveServer(ctx, *lease)
 	require.NoError(t, err)
 
 	select {
@@ -2529,14 +2555,160 @@ func TestUserGroups(t *testing.T) {
 	})
 }
 
+// TestOktaImportRules tests that CRUD operations on Okta import rule resources are
+// replicated from the backend to the cache.
+func TestOktaImportRules(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPack(t, ForOkta)
+	t.Cleanup(p.Close)
+
+	testResources(t, p, testFuncs[types.OktaImportRule]{
+		newResource: func(name string) (types.OktaImportRule, error) {
+			return types.NewOktaImportRule(
+				types.Metadata{
+					Name: name,
+				},
+				types.OktaImportRuleSpecV1{
+					Mappings: []*types.OktaImportRuleMappingV1{
+						{
+							Match: []*types.OktaImportRuleMatchV1{
+								{
+									AppIDs: []string{"yes"},
+								},
+							},
+							AddLabels: map[string]string{
+								"label1": "value1",
+							},
+						},
+						{
+							Match: []*types.OktaImportRuleMatchV1{
+								{
+									GroupIDs: []string{"yes"},
+								},
+							},
+							AddLabels: map[string]string{
+								"label1": "value1",
+							},
+						},
+					},
+				},
+			)
+		},
+		create: func(ctx context.Context, resource types.OktaImportRule) error {
+			_, err := p.okta.CreateOktaImportRule(ctx, resource)
+			return trace.Wrap(err)
+		},
+		list: func(ctx context.Context) ([]types.OktaImportRule, error) {
+			results, _, err := p.okta.ListOktaImportRules(ctx, 0, "")
+			return results, err
+		},
+		cacheList: func(ctx context.Context) ([]types.OktaImportRule, error) {
+			results, _, err := p.cache.ListOktaImportRules(ctx, 0, "")
+			return results, err
+		},
+		update: func(ctx context.Context, resource types.OktaImportRule) error {
+			_, err := p.okta.UpdateOktaImportRule(ctx, resource)
+			return trace.Wrap(err)
+		},
+		deleteAll: p.okta.DeleteAllOktaImportRules,
+	})
+}
+
+// TestOktaAssignments tests that CRUD operations on Okta import rule resources are
+// replicated from the backend to the cache.
+func TestOktaAssignments(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPack(t, ForOkta)
+	t.Cleanup(p.Close)
+
+	testResources(t, p, testFuncs[types.OktaAssignment]{
+		newResource: func(name string) (types.OktaAssignment, error) {
+			return types.NewOktaAssignment(
+				types.Metadata{
+					Name: name,
+				},
+				types.OktaAssignmentSpecV1{
+					User: "test-user@test.user",
+					Targets: []*types.OktaAssignmentTargetV1{
+						{
+							Type: types.OktaAssignmentTargetV1_APPLICATION,
+							Id:   "123456",
+						},
+						{
+							Type: types.OktaAssignmentTargetV1_GROUP,
+							Id:   "234567",
+						},
+					},
+				},
+			)
+		},
+		create: func(ctx context.Context, resource types.OktaAssignment) error {
+			_, err := p.okta.CreateOktaAssignment(ctx, resource)
+			return trace.Wrap(err)
+		},
+		list: func(ctx context.Context) ([]types.OktaAssignment, error) {
+			results, _, err := p.okta.ListOktaAssignments(ctx, 0, "")
+			return results, err
+		},
+		cacheList: func(ctx context.Context) ([]types.OktaAssignment, error) {
+			results, _, err := p.cache.ListOktaAssignments(ctx, 0, "")
+			return results, err
+		},
+		update: func(ctx context.Context, resource types.OktaAssignment) error {
+			_, err := p.okta.UpdateOktaAssignment(ctx, resource)
+			return trace.Wrap(err)
+		},
+		deleteAll: p.okta.DeleteAllOktaAssignments,
+	})
+}
+
+// TestIntegrations tests that CRUD operations on integrations resources are
+// replicated from the backend to the cache.
+func TestIntegrations(t *testing.T) {
+	t.Parallel()
+
+	p := newTestPack(t, ForAuth)
+	t.Cleanup(p.Close)
+
+	testResources(t, p, testFuncs[types.Integration]{
+		newResource: func(name string) (types.Integration, error) {
+			return types.NewIntegrationAWSOIDC(
+				types.Metadata{Name: name},
+				&types.AWSOIDCIntegrationSpecV1{
+					RoleARN: "arn:aws:iam::123456789012:role/OpsTeam",
+				},
+			)
+		},
+		create: func(ctx context.Context, i types.Integration) error {
+			_, err := p.integrations.CreateIntegration(ctx, i)
+			return err
+		},
+		list: func(ctx context.Context) ([]types.Integration, error) {
+			results, _, err := p.integrations.ListIntegrations(ctx, 0, "")
+			return results, err
+		},
+		cacheList: func(ctx context.Context) ([]types.Integration, error) {
+			results, _, err := p.cache.ListIntegrations(ctx, 0, "")
+			return results, err
+		},
+		update: func(ctx context.Context, i types.Integration) error {
+			_, err := p.integrations.UpdateIntegration(ctx, i)
+			return err
+		},
+		deleteAll: p.integrations.DeleteAllIntegrations,
+	})
+}
+
 // testResources is a generic tester for resources.
 func testResources[T types.Resource](t *testing.T, p *testPack, funcs testFuncs[T]) {
 	ctx := context.Background()
 
 	// Create a resource.
 	r, err := funcs.newResource("test-sp")
-	r.SetExpiry(time.Now().Add(30 * time.Minute))
 	require.NoError(t, err)
+	r.SetExpiry(time.Now().Add(30 * time.Minute))
 
 	err = funcs.create(ctx, r)
 	require.NoError(t, err)
@@ -2787,7 +2959,7 @@ func TestCache_Backoff(t *testing.T) {
 	p.eventsS.closeWatchers()
 	p.backend.SetReadError(trace.ConnectionProblem(nil, "backend is unavailable"))
 
-	step := p.cache.Config.MaxRetryPeriod / 5.0
+	step := p.cache.Config.MaxRetryPeriod / 16.0
 	for i := 0; i < 5; i++ {
 		// wait for cache to reload
 		select {
@@ -2796,8 +2968,16 @@ func TestCache_Backoff(t *testing.T) {
 			duration, err := time.ParseDuration(event.Event.Resource.GetKind())
 			require.NoError(t, err)
 
-			stepMin := step * time.Duration(i) / 2
-			stepMax := step * time.Duration(i+1)
+			// emulate the logic of exponential backoff multiplier calc
+			var mul int64
+			if i == 0 {
+				mul = 0
+			} else {
+				mul = 1 << (i - 1)
+			}
+
+			stepMin := step * time.Duration(mul) / 2
+			stepMax := step * time.Duration(mul+1)
 
 			require.GreaterOrEqual(t, duration, stepMin)
 			require.LessOrEqual(t, duration, stepMax)
@@ -2875,6 +3055,7 @@ func TestCacheWatchKindExistsInEvents(t *testing.T) {
 		"ForKubernetes":     ForKubernetes(Config{}),
 		"ForApps":           ForApps(Config{}),
 		"ForDatabases":      ForDatabases(Config{}),
+		"ForOkta":           ForOkta(Config{}),
 	}
 
 	events := map[string]types.Resource{
@@ -2917,6 +3098,9 @@ func TestCacheWatchKindExistsInEvents(t *testing.T) {
 		types.KindKubernetesCluster:       &types.KubernetesClusterV3{},
 		types.KindSAMLIdPServiceProvider:  &types.SAMLIdPServiceProviderV1{},
 		types.KindUserGroup:               &types.UserGroupV1{},
+		types.KindOktaImportRule:          &types.OktaImportRuleV1{},
+		types.KindOktaAssignment:          &types.OktaAssignmentV1{},
+		types.KindIntegration:             &types.IntegrationV1{},
 	}
 
 	for name, cfg := range cases {

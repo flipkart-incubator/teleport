@@ -113,11 +113,11 @@ const Separator = styled.div`
   height: 23px;
   width: 1px;
   margin: 0 1px;
-  background: ${props => props.theme.colors.text.placeholder};
+  background: ${props => props.theme.colors.text.muted};
 `;
 
 const StyledTabs = styled(Box)`
-  background-color: ${props => props.theme.colors.primary.main};
+  background-color: ${props => props.theme.colors.levels.surfaceSecondary};
   min-height: 32px;
   border-radius: 4px;
   display: flex;

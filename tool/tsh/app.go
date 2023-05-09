@@ -126,14 +126,16 @@ func onAppLogin(cf *CLIConf) error {
 	if err := tc.SaveProfile(true); err != nil {
 		return trace.Wrap(err)
 	}
-	if app.IsAWSConsole() {
+
+	switch {
+	case app.IsAWSConsole():
 		return awsCliTpl.Execute(os.Stdout, map[string]string{
 			"awsAppName": app.GetName(),
 			"awsCmd":     "s3 ls",
 			"awsRoleARN": awsRoleARN,
 		})
-	}
-	if app.IsAzureCloud() {
+
+	case app.IsAzureCloud():
 		if azureIdentity == "" {
 			return trace.BadParameter("app is Azure Cloud but Azure identity is missing")
 		}
@@ -160,27 +162,38 @@ func onAppLogin(cf *CLIConf) error {
 			"appName":  app.GetName(),
 			"identity": azureIdentity,
 		})
-	}
-	if app.IsGCP() {
+
+	case app.IsGCP():
 		return gcpCliTpl.Execute(os.Stdout, map[string]string{
 			"appName":        app.GetName(),
 			"serviceAccount": gcpServiceAccount,
 		})
-	}
-	if app.IsTCP() {
+
+	case app.IsTCP():
 		return appLoginTCPTpl.Execute(os.Stdout, map[string]string{
 			"appName": app.GetName(),
 		})
+
+	case localProxyRequiredForApp(tc):
+		return appLoginLocalProxyTpl.Execute(os.Stdout, map[string]interface{}{
+			"appName": app.GetName(),
+		})
+
+	default:
+		curlCmd, err := formatAppConfig(tc, profile, app.GetName(), app.GetPublicAddr(), appFormatCURL, rootCluster, awsRoleARN, azureIdentity, gcpServiceAccount)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		return appLoginTpl.Execute(os.Stdout, map[string]interface{}{
+			"appName":  app.GetName(),
+			"curlCmd":  curlCmd,
+			"insecure": cf.InsecureSkipVerify,
+		})
 	}
-	curlCmd, err := formatAppConfig(tc, profile, app.GetName(), app.GetPublicAddr(), appFormatCURL, rootCluster, awsRoleARN, azureIdentity, gcpServiceAccount)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	return appLoginTpl.Execute(os.Stdout, map[string]interface{}{
-		"appName":  app.GetName(),
-		"curlCmd":  curlCmd,
-		"insecure": cf.InsecureSkipVerify,
-	})
+}
+
+func localProxyRequiredForApp(tc *client.TeleportClient) bool {
+	return tc.TLSRoutingConnUpgradeRequired
 }
 
 // appLoginTpl is the message that gets printed to a user upon successful login
@@ -192,6 +205,18 @@ var appLoginTpl = template.Must(template.New("").Parse(
 
 WARNING: tsh was called with --insecure, so this curl command will be unable to validate the certificate presented by Teleport.
 {{- end }}
+`))
+
+// appLoginLocalProxyTpl is the message that gets printed to a user upon successful login
+// into an HTTP application and local proxy is required.
+var appLoginLocalProxyTpl = template.Must(template.New("").Parse(
+	`Logged into app {{.appName}}. Start the local proxy for it:
+
+  tsh proxy app {{.appName}} -p 8080
+
+Then connect to the application through this proxy:
+
+  curl http://127.0.0.1:8080
 `))
 
 // appLoginTCPTpl is the message that gets printed to a user upon successful
@@ -462,18 +487,7 @@ func pickActiveApp(cf *CLIConf) (*tlsca.RouteToApp, error) {
 
 // removeAppLocalFiles removes generated local files for the provided app.
 func removeAppLocalFiles(profile *client.ProfileStatus, appName string) {
-	removeFileIfExist(profile.AppLocalCAPath(appName))
-}
-
-// removeFileIfExist removes a local file if it exists.
-func removeFileIfExist(filePath string) {
-	if !utils.FileExists(filePath) {
-		return
-	}
-
-	if err := os.Remove(filePath); err != nil {
-		log.WithError(err).Warnf("Failed to remove %v", filePath)
-	}
+	utils.RemoveFileIfExist(profile.AppLocalCAPath(appName))
 }
 
 // loadAppSelfSignedCA loads self-signed CA for provided app, or tries to

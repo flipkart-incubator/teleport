@@ -188,11 +188,11 @@ type InitConfig struct {
 	// UserGroups is a service that manages user groups.
 	UserGroups services.UserGroups
 
+	// Integrations is a service that manages Integrations.
+	Integrations services.Integrations
+
 	// SessionTrackerService is a service that manages trackers for all active sessions.
 	SessionTrackerService services.SessionTrackerService
-
-	// Enforcer is used to enforce Teleport Enterprise license compliance.
-	Enforcer services.Enforcer
 
 	// ConnectionsDiagnostic is a service that manages Connection Diagnostics resources.
 	ConnectionsDiagnostic services.ConnectionsDiagnostic
@@ -214,6 +214,9 @@ type InitConfig struct {
 
 	// UsageReporter is a service that forwards cluster usage events.
 	UsageReporter usagereporter.UsageReporter
+
+	// Okta is a service that manages Okta resources.
+	Okta services.Okta
 }
 
 // Init instantiates and configures an instance of AuthServer
@@ -664,7 +667,7 @@ func checkResourceConsistency(ctx context.Context, keyStore *keystore.Manager, c
 				_, signerErr = keyStore.GetSSHSigner(ctx, r)
 			case types.DatabaseCA, types.SAMLIDPCA:
 				_, _, signerErr = keyStore.GetTLSCertAndSigner(ctx, r)
-			case types.JWTSigner:
+			case types.JWTSigner, types.OIDCIdPCA:
 				_, signerErr = keyStore.GetJWTSigner(ctx, r)
 			default:
 				return trace.BadParameter("unexpected cert_authority type %s for cluster %v", r.GetType(), clusterName)

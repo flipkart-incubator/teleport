@@ -42,12 +42,16 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/gravitational/teleport/api/breaker"
+	"github.com/gravitational/teleport/api/client/okta"
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/defaults"
 	devicepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/devicetrust/v1"
+	integrationpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/integration/v1"
 	kubeproto "github.com/gravitational/teleport/api/gen/proto/go/teleport/kube/v1"
 	loginrulepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/loginrule/v1"
+	oktapb "github.com/gravitational/teleport/api/gen/proto/go/teleport/okta/v1"
+	pluginspb "github.com/gravitational/teleport/api/gen/proto/go/teleport/plugins/v1"
 	samlidppb "github.com/gravitational/teleport/api/gen/proto/go/teleport/samlidp/v1"
 	"github.com/gravitational/teleport/api/metadata"
 	"github.com/gravitational/teleport/api/observability/tracing"
@@ -126,6 +130,15 @@ func NewTracingClient(ctx context.Context, cfg Config) (*tracing.Client, error) 
 	}
 
 	return tracing.NewClient(clt.GetConnection()), nil
+}
+
+// NewOktaClient creates a new Okta client for managing Okta resources.
+func NewOktaClient(ctx context.Context, cfg Config) (*okta.Client, error) {
+	clt, err := New(ctx, cfg)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return okta.NewClient(oktapb.NewOktaServiceClient(clt.GetConnection())), nil
 }
 
 // newClient constructs a new client.
@@ -544,7 +557,16 @@ func (c *Config) CheckAndSetDefaults() error {
 		PermitWithoutStream: true,
 	}))
 	if !c.DialInBackground {
-		c.DialOpts = append(c.DialOpts, grpc.WithBlock())
+		c.DialOpts = append(
+			c.DialOpts,
+			// Provides additional feedback on connection failure, otherwise,
+			// users will only receive a `context deadline exceeded` error when
+			// c.DialInBackground == false.
+			//
+			// grpc.WithReturnConnectionError implies grpc.WithBlock which is
+			// necessary for connection route selection to work properly.
+			grpc.WithReturnConnectionError(),
+		)
 	}
 
 	return nil
@@ -1791,7 +1813,7 @@ func (c *Client) GetSAMLAuthRequest(ctx context.Context, id string) (*types.SAML
 // GetGithubConnector returns a Github connector by name.
 func (c *Client) GetGithubConnector(ctx context.Context, name string, withSecrets bool) (types.GithubConnector, error) {
 	if name == "" {
-		return nil, trace.BadParameter("cannot get Github Connector, missing name")
+		return nil, trace.BadParameter("cannot get GitHub Connector, missing name")
 	}
 	req := &types.ResourceWithSecretsRequest{Name: name, WithSecrets: withSecrets}
 	resp, err := c.grpc.GetGithubConnector(ctx, req, c.callOpts...)
@@ -1828,7 +1850,7 @@ func (c *Client) UpsertGithubConnector(ctx context.Context, connector types.Gith
 // DeleteGithubConnector deletes a Github connector by name.
 func (c *Client) DeleteGithubConnector(ctx context.Context, name string) error {
 	if name == "" {
-		return trace.BadParameter("cannot delete Github Connector, missing name")
+		return trace.BadParameter("cannot delete GitHub Connector, missing name")
 	}
 	_, err := c.grpc.DeleteGithubConnector(ctx, &types.ResourceRequest{Name: name}, c.callOpts...)
 	return trail.FromGRPC(err)
@@ -2852,6 +2874,8 @@ func (c *Client) ListResources(ctx context.Context, req proto.ListResourcesReque
 			resources[i] = respResource.GetKubeCluster()
 		case types.KindKubeServer:
 			resources[i] = respResource.GetKubernetesServer()
+		case types.KindUserGroup:
+			resources[i] = respResource.GetUserGroup()
 		default:
 			return nil, trace.NotImplemented("resource type %s does not support pagination", req.ResourceType)
 		}
@@ -2919,7 +2943,7 @@ func GetResourcesWithFilters(ctx context.Context, clt ListResourcesClient, req p
 
 // GetKubernetesResourcesWithFilters is a helper for getting a list of kubernetes resources with optional filtering. In addition to
 // iterating pages, it also correctly handles downsizing pages when LimitExceeded errors are encountered.
-func GetKubernetesResourcesWithFilters(ctx context.Context, clt kubeproto.KubeServiceClient, req kubeproto.ListKubernetesResourcesRequest) ([]types.ResourceWithLabels, error) {
+func GetKubernetesResourcesWithFilters(ctx context.Context, clt kubeproto.KubeServiceClient, req *kubeproto.ListKubernetesResourcesRequest) ([]types.ResourceWithLabels, error) {
 	var (
 		resources []types.ResourceWithLabels
 		startKey  = req.StartKey
@@ -2940,7 +2964,7 @@ func GetKubernetesResourcesWithFilters(ctx context.Context, clt kubeproto.KubeSe
 
 		resp, err := clt.ListKubernetesResources(
 			ctx,
-			&req,
+			req,
 		)
 		if err != nil {
 			if trace.IsLimitExceeded(err) {
@@ -3337,6 +3361,99 @@ func (c *Client) DeleteAllUserGroups(ctx context.Context) error {
 	return nil
 }
 
+// integrationsClient returns an unadorned Integration client, using the underlying
+// Auth gRPC connection.
+func (c *Client) integrationsClient() integrationpb.IntegrationServiceClient {
+	return integrationpb.NewIntegrationServiceClient(c.conn)
+}
+
+// ListIntegrations returns a paginated list of Integrations.
+// The response includes a nextKey which must be used to fetch the next page.
+func (c *Client) ListIntegrations(ctx context.Context, pageSize int, nextKey string) ([]types.Integration, string, error) {
+	resp, err := c.integrationsClient().ListIntegrations(ctx, &integrationpb.ListIntegrationsRequest{
+		Limit:   int32(pageSize),
+		NextKey: nextKey,
+	})
+	if err != nil {
+		return nil, "", trail.FromGRPC(err)
+	}
+
+	integrations := make([]types.Integration, 0, len(resp.GetIntegrations()))
+	for _, ig := range resp.GetIntegrations() {
+		integrations = append(integrations, ig)
+	}
+
+	return integrations, resp.GetNextKey(), nil
+}
+
+// GetIntegration returns an Integration by its name.
+func (c *Client) GetIntegration(ctx context.Context, name string) (types.Integration, error) {
+	ig, err := c.integrationsClient().GetIntegration(ctx, &integrationpb.GetIntegrationRequest{
+		Name: name,
+	})
+	if err != nil {
+		return nil, trail.FromGRPC(err)
+	}
+
+	return ig, nil
+}
+
+// CreateIntegration creates a new Integration.
+func (c *Client) CreateIntegration(ctx context.Context, ig types.Integration) (types.Integration, error) {
+	igV1, ok := ig.(*types.IntegrationV1)
+	if !ok {
+		return nil, trace.BadParameter("unsupported integration type %T", ig)
+	}
+
+	ig, err := c.integrationsClient().CreateIntegration(ctx, &integrationpb.CreateIntegrationRequest{Integration: igV1})
+	if err != nil {
+		return nil, trail.FromGRPC(err)
+	}
+
+	return ig, nil
+}
+
+// UpdateIntegration updates an existing Integration.
+func (c *Client) UpdateIntegration(ctx context.Context, ig types.Integration) (types.Integration, error) {
+	igV1, ok := ig.(*types.IntegrationV1)
+	if !ok {
+		return nil, trace.BadParameter("unsupported integration type %T", ig)
+	}
+
+	ig, err := c.integrationsClient().UpdateIntegration(ctx, &integrationpb.UpdateIntegrationRequest{Integration: igV1})
+	if err != nil {
+		return nil, trail.FromGRPC(err)
+	}
+
+	return ig, nil
+}
+
+// DeleteIntegration removes an Integration by its name.
+func (c *Client) DeleteIntegration(ctx context.Context, name string) error {
+	_, err := c.integrationsClient().DeleteIntegration(ctx, &integrationpb.DeleteIntegrationRequest{
+		Name: name,
+	})
+	return trail.FromGRPC(err)
+}
+
+// DeleteAllIntegrations removes all Integrations.
+func (c *Client) DeleteAllIntegrations(ctx context.Context) error {
+	_, err := c.integrationsClient().DeleteAllIntegrations(ctx, &integrationpb.DeleteAllIntegrationsRequest{})
+	return trail.FromGRPC(err)
+}
+
+// GenerateAWSOIDCToken generates a token to be used when executing an AWS OIDC Integration action.
+func (c *Client) GenerateAWSOIDCToken(ctx context.Context, req types.GenerateAWSOIDCTokenRequest) (string, error) {
+	resp, err := c.integrationsClient().GenerateAWSOIDCToken(ctx, &integrationpb.GenerateAWSOIDCTokenRequest{
+		Issuer: req.Issuer,
+	})
+	if err != nil {
+		return "", trail.FromGRPC(err)
+	}
+
+	return resp.GetToken(), nil
+}
+
 // GetLoginRule retrieves a login rule described by name.
 func (c *Client) GetLoginRule(ctx context.Context, name string) (*loginrulepb.LoginRule, error) {
 	rule, err := c.LoginRuleClient().GetLoginRule(ctx, &loginrulepb.GetLoginRuleRequest{
@@ -3369,4 +3486,45 @@ func (c *Client) DeleteLoginRule(ctx context.Context, name string) error {
 		Name: name,
 	}, c.callOpts...)
 	return trail.FromGRPC(err)
+}
+
+// OktaClient returns an Okta client.
+// Clients connecting older Teleport versions still get an okta client when
+// calling this method, but all RPCs will return "not implemented" errors (as per
+// the default gRPC behavior).
+func (c *Client) OktaClient() *okta.Client {
+	return okta.NewClient(oktapb.NewOktaServiceClient(c.conn))
+}
+
+// UpdateHeadlessAuthenticationState updates a headless authentication state.
+func (c *Client) UpdateHeadlessAuthenticationState(ctx context.Context, id string, state types.HeadlessAuthenticationState, mfaResponse *proto.MFAAuthenticateResponse) error {
+	_, err := c.grpc.UpdateHeadlessAuthenticationState(ctx, &proto.UpdateHeadlessAuthenticationStateRequest{
+		Id:          id,
+		State:       state,
+		MfaResponse: mfaResponse,
+	}, c.callOpts...)
+	if err != nil {
+		return trail.FromGRPC(err)
+	}
+	return nil
+}
+
+// GetHeadlessAuthentication retrieves a headless authentication by id.
+func (c *Client) GetHeadlessAuthentication(ctx context.Context, id string) (*types.HeadlessAuthentication, error) {
+	headlessAuthn, err := c.grpc.GetHeadlessAuthentication(ctx, &proto.GetHeadlessAuthenticationRequest{
+		Id: id,
+	}, c.callOpts...)
+	if err != nil {
+		return nil, trail.FromGRPC(err)
+	}
+	return headlessAuthn, nil
+}
+
+// PluginsClient returns an unadorned Plugins client, using the underlying
+// Auth gRPC connection.
+// Clients connecting to non-Enterprise clusters, or older Teleport versions,
+// still get a plugins client when calling this method, but all RPCs will return
+// "not implemented" errors (as per the default gRPC behavior).
+func (c *Client) PluginsClient() pluginspb.PluginServiceClient {
+	return pluginspb.NewPluginServiceClient(c.conn)
 }

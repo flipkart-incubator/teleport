@@ -19,8 +19,19 @@ package types
 import (
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/gravitational/trace"
+
+	"github.com/gravitational/teleport/api/utils"
+)
+
+// PluginType represents the type of the plugin
+type PluginType string
+
+const (
+	// PluginTypeUnknown is returned when no plugin type matches.
+	PluginTypeUnknown PluginType = ""
+	// PluginTypeSlack is the Slack access request plugin
+	PluginTypeSlack = "slack"
 )
 
 // Plugin represents a plugin instance
@@ -30,6 +41,7 @@ type Plugin interface {
 	Clone() Plugin
 	GetCredentials() PluginCredentials
 	GetStatus() PluginStatus
+	GetType() PluginType
 	SetCredentials(PluginCredentials) error
 	SetStatus(PluginStatus) error
 }
@@ -111,7 +123,7 @@ func (p *PluginV1) setStaticFields() {
 
 // Clone returns a copy of the Plugin instance
 func (p *PluginV1) Clone() Plugin {
-	return proto.Clone(p).(*PluginV1)
+	return utils.CloneProtoMsg(p)
 }
 
 // GetVersion returns resource version
@@ -205,13 +217,20 @@ func (p *PluginV1) SetStatus(status PluginStatus) error {
 		p.Status = PluginStatusV1{}
 		return nil
 	}
-	switch status := status.(type) {
-	case PluginStatusV1:
-		p.Status = status
-	default:
-		return trace.BadParameter("unsupported plugin status type %T", status)
+	p.Status = PluginStatusV1{
+		Code: status.GetCode(),
 	}
 	return nil
+}
+
+// GetType implements Plugin
+func (p *PluginV1) GetType() PluginType {
+	switch p.Spec.Settings.(type) {
+	case *PluginSpecV1_SlackAccessPlugin:
+		return PluginTypeSlack
+	default:
+		return PluginTypeUnknown
+	}
 }
 
 // CheckAndSetDefaults validates and set the default values

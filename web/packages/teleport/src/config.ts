@@ -30,6 +30,7 @@ import type {
 
 import type { SortType } from 'teleport/services/agents';
 import type { RecordingType } from 'teleport/services/recordings';
+import type { WebauthnAssertionResponse } from './services/auth';
 
 import type { ParticipantMode } from 'teleport/services/session';
 
@@ -37,6 +38,7 @@ const cfg = {
   isEnterprise: false,
   isCloud: false,
   isDashboard: false,
+  isUsageBasedBilling: false,
   tunnelPublicAddress: '',
   recoveryCodesEnabled: false,
 
@@ -109,6 +111,10 @@ const cfg = {
     userReset: '/web/reset/:tokenId',
     userResetContinue: '/web/reset/:tokenId/continue',
     kubernetes: '/web/cluster/:clusterId/kubernetes',
+    headlessSso: `/web/headless/:requestId`,
+    integrations: '/web/integrations',
+    integrationEnroll: '/web/integrations/new/:type?',
+
     // whitelist sso handlers
     oidcHandler: '/v1/webapi/oidc/*',
     samlHandler: '/v1/webapi/saml/*',
@@ -152,10 +158,10 @@ const cfg = {
     desktopPlaybackWsAddr:
       'wss://:fqdn/v1/webapi/sites/:clusterId/desktopplayback/:sid?access_token=:token',
     desktopIsActive: '/v1/webapi/sites/:clusterId/desktops/:desktopName/active',
-    siteSessionPath: '/v1/webapi/sites/:siteId/sessions',
     ttyWsAddr:
       'wss://:fqdn/v1/webapi/sites/:clusterId/connect?access_token=:token&params=:params&traceparent=:traceparent',
-    terminalSessionPath: '/v1/webapi/sites/:clusterId/sessions/:sid?',
+    activeAndPendingSessionsPath: '/v1/webapi/sites/:clusterId/sessions',
+    sshPlaybackPrefix: '/v1/webapi/sites/:clusterId/sessions/:sid', // prefix because this is eventually concatenated with "/stream" or "/events"
     kubernetesPath:
       '/v1/webapi/sites/:clusterId/kubernetes?searchAsRoles=:searchAsRoles?&limit=:limit?&startKey=:startKey?&query=:query?&search=:search?&sort=:sort?',
 
@@ -176,6 +182,8 @@ const cfg = {
     mfaLoginBegin: '/v1/webapi/mfa/login/begin', // creates authnenticate challenge with user and password
     mfaLoginFinish: '/v1/webapi/mfa/login/finishsession', // creates a web session
     mfaChangePasswordBegin: '/v1/webapi/mfa/authenticatechallenge/password',
+
+    headlessSsoPath: `/v1/webapi/headless/:requestId`,
 
     mfaCreateRegistrationChallengePath:
       '/v1/webapi/mfa/token/:tokenId/registerchallenge',
@@ -198,6 +206,20 @@ const cfg = {
 
     captureUserEventPath: '/v1/webapi/capture',
     capturePreUserEventPath: '/v1/webapi/precapture',
+
+    headlessLogin: '/v1/webapi/headless/:headless_authentication_id',
+
+    webapiPingPath: '/v1/webapi/ping',
+
+    integrationsPath: '/v1/webapi/sites/:clusterId/integrations/:name?',
+    integrationExecutePath:
+      '/v1/webapi/sites/:clusterId/integrations/:name/action/:action',
+
+    awsRdsDbListPath:
+      '/v1/webapi/sites/:clusterId/integrations/aws-oidc/:name/databases',
+
+    userGroupsListPath:
+      '/v1/webapi/sites/:clusterId/user-groups?searchAsRoles=:searchAsRoles?&limit=:limit?&startKey=:startKey?&query=:query?&search=:search?&sort=:sort?',
   },
 
   getAppFqdnUrl(params: UrlAppParams) {
@@ -271,6 +293,10 @@ const cfg = {
 
   getAuditRoute(clusterId: string) {
     return generatePath(cfg.routes.audit, { clusterId });
+  },
+
+  getIntegrationEnrollRoute(type?: string) {
+    return generatePath(cfg.routes.integrationEnroll, { type });
   },
 
   getNodesRoute(clusterId: string) {
@@ -424,6 +450,10 @@ const cfg = {
     return generatePath(cfg.routes.userResetContinue, { tokenId });
   },
 
+  getHeadlessSsoPath(requestId: string) {
+    return generatePath(cfg.api.headlessSsoPath, { requestId });
+  },
+
   getUserInviteTokenRoute(tokenId = '') {
     return generatePath(cfg.routes.userInvite, { tokenId });
   },
@@ -444,8 +474,12 @@ const cfg = {
     return generatePath(cfg.api.userWithUsernamePath, { username });
   },
 
-  getTerminalSessionUrl({ clusterId, sid }: UrlParams) {
-    return generatePath(cfg.api.terminalSessionPath, { clusterId, sid });
+  getSshPlaybackPrefixUrl({ clusterId, sid }: UrlParams) {
+    return generatePath(cfg.api.sshPlaybackPrefix, { clusterId, sid });
+  },
+
+  getActiveAndPendingSessionsUrl({ clusterId }: UrlParams) {
+    return generatePath(cfg.api.activeAndPendingSessionsPath, { clusterId });
   },
 
   getClusterNodesUrl(clusterId: string, params: UrlResourcesParams) {
@@ -515,10 +549,19 @@ const cfg = {
     });
   },
 
-  getScpUrl(params: UrlScpParams) {
-    return generatePath(cfg.api.scp, {
+  getScpUrl({ webauthn, ...params }: UrlScpParams) {
+    let path = generatePath(cfg.api.scp, {
       ...params,
     });
+    if (!webauthn) {
+      return path;
+    }
+    // non-required MFA will mean this param is undefined and generatePath doesn't like undefined
+    // or optional params. So we append it ourselves here. Its ok to be undefined when sent to the server
+    // as the existence of this param is what will issue certs
+    return `${path}&webauthn=${JSON.stringify({
+      webauthnAssertionResponse: webauthn,
+    })}`;
   },
 
   getRenewTokenUrl() {
@@ -564,6 +607,32 @@ const cfg = {
     });
   },
 
+  getIntegrationsUrl(integrationName?: string) {
+    // Currently you can only create integrations at the root cluster.
+    const clusterId = cfg.proxyCluster;
+    return generatePath(cfg.api.integrationsPath, {
+      clusterId,
+      name: integrationName,
+    });
+  },
+
+  getUserGroupsListUrl(clusterId: string, params: UrlResourcesParams) {
+    return generateResourcePath(cfg.api.userGroupsListPath, {
+      clusterId,
+      ...params,
+    });
+  },
+
+  getAwsRdsDbListUrl(integrationName: string) {
+    // Currently you can only create integrations at the root cluster.
+    const clusterId = cfg.proxyCluster;
+
+    return generatePath(cfg.api.awsRdsDbListPath, {
+      clusterId,
+      name: integrationName,
+    });
+  },
+
   getUIConfig() {
     return cfg.ui;
   },
@@ -593,6 +662,7 @@ export interface UrlScpParams {
   login: string;
   location: string;
   filename: string;
+  webauthn?: WebauthnAssertionResponse;
 }
 
 export interface UrlSshParams {

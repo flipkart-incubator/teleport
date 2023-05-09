@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/oauth2"
 	"github.com/ghodss/yaml"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
@@ -71,6 +72,15 @@ import (
 type Rate struct {
 	Amount int
 	Time   time.Duration
+}
+
+// RoleAndIdentityEvent is a role and its corresponding identity event.
+type RoleAndIdentityEvent struct {
+	// Role is a system role.
+	Role types.SystemRole
+
+	// IdentityEvent is the identity event associated with the above role.
+	IdentityEvent string
 }
 
 // JoinParams is a set of extra parameters for joining the auth server.
@@ -141,6 +151,9 @@ type Config struct {
 
 	// Discovery defines the discovery service configuration.
 	Discovery DiscoveryConfig
+
+	// Okta defines the okta service configuration.
+	Okta OktaConfig
 
 	// Tracing defines the tracing service configuration.
 	Tracing TracingConfig
@@ -275,6 +288,9 @@ type Config struct {
 
 	// CircuitBreakerConfig configures the auth client circuit breaker.
 	CircuitBreakerConfig breaker.Config
+
+	// AdditionalExpectedRoles are additional roles to attach to the Teleport instances.
+	AdditionalExpectedRoles []RoleAndIdentityEvent
 
 	// AdditionalReadyEvents are additional events to watch for to consider the Teleport instance ready.
 	AdditionalReadyEvents []string
@@ -729,6 +745,9 @@ type AuthConfig struct {
 	// LoadAllCAs sends the host CAs of all clusters to SSH clients logging in when enabled,
 	// instead of just the host CA for the current cluster.
 	LoadAllCAs bool
+
+	// HostedPlugins configures the Enterprise hosted plugin runtime
+	HostedPlugins HostedPluginsConfig
 }
 
 // SSHConfig configures SSH server node role
@@ -1472,6 +1491,14 @@ type Header struct {
 
 type DiscoveryConfig struct {
 	Enabled bool
+	// DiscoveryGroup is the name of the discovery group that the current
+	// discovery service is a part of.
+	// It is used to filter out discovered resources that belong to another
+	// discovery services. When running in high availability mode and the agents
+	// have access to the same cloud resources, this field value must be the same
+	// for all discovery services. If different agents are used to discover different
+	// sets of cloud resources, this field must be different for each set of agents.
+	DiscoveryGroup string
 	// AWSMatchers are used to match EC2 instances for auto enrollment.
 	AWSMatchers []services.AWSMatcher
 	// AzureMatchers are used to match resources for auto enrollment.
@@ -1484,6 +1511,18 @@ type DiscoveryConfig struct {
 func (d DiscoveryConfig) IsEmpty() bool {
 	return len(d.AWSMatchers) == 0 &&
 		len(d.AzureMatchers) == 0 && len(d.GCPMatchers) == 0
+}
+
+// HostedPluginsConfig configures the hosted plugin runtime.
+type HostedPluginsConfig struct {
+	Enabled        bool
+	OAuthProviders PluginOAuthProviders
+}
+
+// PluginOAuthProviders holds application credentials for each
+// 3rd party API provider
+type PluginOAuthProviders struct {
+	Slack *oauth2.ClientCredentials
 }
 
 // ParseHeader parses the provided string as a http header.

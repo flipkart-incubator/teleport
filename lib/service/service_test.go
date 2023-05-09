@@ -50,8 +50,10 @@ import (
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/backend/lite"
 	"github.com/gravitational/teleport/lib/backend/memory"
+	"github.com/gravitational/teleport/lib/cloud"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/limiter"
+	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
@@ -72,6 +74,99 @@ func TestServiceSelfSignedHTTPS(t *testing.T) {
 	require.Len(t, cfg.Proxy.KeyPairs, 1)
 	require.FileExists(t, cfg.Proxy.KeyPairs[0].Certificate)
 	require.FileExists(t, cfg.Proxy.KeyPairs[0].PrivateKey)
+}
+
+func TestAdditionalExpectedRoles(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           func() *Config
+		expectedRoles map[types.SystemRole]string
+	}{
+		{
+			name: "everything enabled",
+			cfg: func() *Config {
+				cfg := MakeDefaultConfig()
+				cfg.DataDir = t.TempDir()
+				cfg.SetAuthServerAddress(utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"})
+				cfg.Auth.StorageConfig.Params["path"] = t.TempDir()
+				cfg.DiagnosticAddr = utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"}
+				cfg.Auth.ListenAddr = utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"}
+
+				cfg.Auth.Enabled = true
+				cfg.SSH.Enabled = true
+				cfg.Proxy.Enabled = true
+				cfg.Kube.Enabled = true
+				cfg.Apps.Enabled = true
+				cfg.Databases.Enabled = true
+				cfg.WindowsDesktop.Enabled = true
+				cfg.Discovery.Enabled = true
+				return cfg
+			},
+			expectedRoles: map[types.SystemRole]string{
+				types.RoleAuth:           AuthIdentityEvent,
+				types.RoleNode:           SSHIdentityEvent,
+				types.RoleKube:           KubeIdentityEvent,
+				types.RoleApp:            AppsIdentityEvent,
+				types.RoleDatabase:       DatabasesIdentityEvent,
+				types.RoleWindowsDesktop: WindowsDesktopIdentityEvent,
+				types.RoleDiscovery:      DiscoveryIdentityEvent,
+				types.RoleProxy:          ProxyIdentityEvent,
+			},
+		},
+		{
+			name: "everything enabled with additional roles",
+			cfg: func() *Config {
+				cfg := MakeDefaultConfig()
+				cfg.DataDir = t.TempDir()
+				cfg.SetAuthServerAddress(utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"})
+				cfg.Auth.StorageConfig.Params["path"] = t.TempDir()
+				cfg.DiagnosticAddr = utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"}
+				cfg.Auth.ListenAddr = utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"}
+
+				cfg.Auth.Enabled = true
+				cfg.SSH.Enabled = true
+				cfg.Proxy.Enabled = true
+				cfg.Kube.Enabled = true
+				cfg.Apps.Enabled = true
+				cfg.Databases.Enabled = true
+				cfg.WindowsDesktop.Enabled = true
+				cfg.Discovery.Enabled = true
+
+				cfg.AdditionalExpectedRoles = []RoleAndIdentityEvent{
+					{
+						Role:          types.RoleOkta,
+						IdentityEvent: "some-identity-event",
+					},
+					{
+						Role:          types.RoleBot,
+						IdentityEvent: "some-other-identity-event",
+					},
+				}
+
+				return cfg
+			},
+			expectedRoles: map[types.SystemRole]string{
+				types.RoleAuth:           AuthIdentityEvent,
+				types.RoleNode:           SSHIdentityEvent,
+				types.RoleKube:           KubeIdentityEvent,
+				types.RoleApp:            AppsIdentityEvent,
+				types.RoleDatabase:       DatabasesIdentityEvent,
+				types.RoleWindowsDesktop: WindowsDesktopIdentityEvent,
+				types.RoleDiscovery:      DiscoveryIdentityEvent,
+				types.RoleProxy:          ProxyIdentityEvent,
+				types.RoleOkta:           "some-identity-event",
+				types.RoleBot:            "some-other-identity-event",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			process, err := NewTeleport(test.cfg())
+			require.NoError(t, err)
+			require.Equal(t, test.expectedRoles, process.instanceRoles)
+		})
+	}
 }
 
 func TestMonitor(t *testing.T) {
@@ -422,6 +517,17 @@ func TestGetAdditionalPrincipals(t *testing.T) {
 			},
 		},
 		{
+			role: types.RoleOkta,
+			wantPrincipals: []string{
+				"global-hostname",
+				"global-uuid",
+			},
+			wantDNS: []string{
+				"*.teleport.cluster.local",
+				"teleport.cluster.local",
+			},
+		},
+		{
 			role: types.SystemRole("unknown"),
 			wantPrincipals: []string{
 				"global-hostname",
@@ -483,9 +589,11 @@ func TestSetupProxyTLSConfig(t *testing.T) {
 				"http/1.1",
 				"h2",
 				"acme-tls/1",
+				"teleport-tcp-ping",
 				"teleport-postgres-ping",
 				"teleport-mysql-ping",
 				"teleport-mongodb-ping",
+				"teleport-oracle-ping",
 				"teleport-redis-ping",
 				"teleport-sqlserver-ping",
 				"teleport-snowflake-ping",
@@ -502,6 +610,7 @@ func TestSetupProxyTLSConfig(t *testing.T) {
 				"teleport-postgres",
 				"teleport-mysql",
 				"teleport-mongodb",
+				"teleport-oracle",
 				"teleport-redis",
 				"teleport-sqlserver",
 				"teleport-snowflake",
@@ -514,9 +623,11 @@ func TestSetupProxyTLSConfig(t *testing.T) {
 			name:        "ACME disabled",
 			acmeEnabled: false,
 			wantNextProtos: []string{
+				"teleport-tcp-ping",
 				"teleport-postgres-ping",
 				"teleport-mysql-ping",
 				"teleport-mongodb-ping",
+				"teleport-oracle-ping",
 				"teleport-redis-ping",
 				"teleport-sqlserver-ping",
 				"teleport-snowflake-ping",
@@ -536,6 +647,7 @@ func TestSetupProxyTLSConfig(t *testing.T) {
 				"teleport-postgres",
 				"teleport-mysql",
 				"teleport-mongodb",
+				"teleport-oracle",
 				"teleport-redis",
 				"teleport-sqlserver",
 				"teleport-snowflake",
@@ -581,18 +693,20 @@ func TestSetupProxyTLSConfig(t *testing.T) {
 
 func TestTeleportProcess_reconnectToAuth(t *testing.T) {
 	t.Parallel()
-	clock := clockwork.NewFakeClock()
 	// Create and configure a default Teleport configuration.
 	cfg := MakeDefaultConfig()
 	cfg.SetAuthServerAddress(utils.NetAddr{AddrNetwork: "tcp", Addr: "127.0.0.1:0"})
-	cfg.Clock = clock
+	cfg.Clock = clockwork.NewRealClock()
 	cfg.DataDir = t.TempDir()
 	cfg.Auth.Enabled = false
 	cfg.Proxy.Enabled = false
 	cfg.SSH.Enabled = true
-	cfg.MaxRetryPeriod = defaults.MaxWatcherBackoff
+	cfg.MaxRetryPeriod = 5 * time.Millisecond
 	cfg.CircuitBreakerConfig = breaker.NoopBreakerConfig()
 	cfg.ConnectFailureC = make(chan time.Duration, 5)
+	cfg.ClientTimeout = time.Millisecond
+	cfg.InstanceMetadataClient = cloud.NewDisabledIMDSClient()
+	cfg.Log = utils.NewLoggerForTests()
 	process, err := NewTeleport(cfg)
 	require.NoError(t, err)
 
@@ -605,6 +719,7 @@ func TestTeleportProcess_reconnectToAuth(t *testing.T) {
 		require.Nil(t, c)
 	}()
 
+	timeout := time.After(10 * time.Second)
 	step := cfg.MaxRetryPeriod / 5.0
 	for i := 0; i < 5; i++ {
 		// wait for connection to fail
@@ -615,14 +730,8 @@ func TestTeleportProcess_reconnectToAuth(t *testing.T) {
 
 			require.GreaterOrEqual(t, duration, stepMin)
 			require.LessOrEqual(t, duration, stepMax)
-
-			// wait for connection to get to retry.After
-			clock.BlockUntil(1)
-
-			// add some extra to the duration to ensure the retry occurs
-			clock.Advance(cfg.MaxRetryPeriod)
-		case <-time.After(time.Minute):
-			t.Fatalf("timeout waiting for failure")
+		case <-timeout:
+			t.Fatalf("timeout waiting for failure %d", i)
 		}
 	}
 
@@ -1070,6 +1179,64 @@ func TestProxyGRPCServers(t *testing.T) {
 				grpc.FailOnNonTempDialError(true),
 			)
 			tt.assertErr(t, err)
+		})
+	}
+}
+
+func TestEnterpriseServicesEnabled(t *testing.T) {
+	tests := []struct {
+		name       string
+		enterprise bool
+		config     *Config
+		expected   bool
+	}{
+		{
+			name:       "enterprise enabled, okta enabled",
+			enterprise: true,
+			config: &Config{
+				Okta: OktaConfig{
+					Enabled: true,
+				},
+			},
+			expected: true,
+		},
+		{
+			name:       "enterprise disabled, okta enabled",
+			enterprise: false,
+			config: &Config{
+				Okta: OktaConfig{
+					Enabled: true,
+				},
+			},
+			expected: false,
+		},
+		{
+			name:       "enterprise enabled, okta disabled",
+			enterprise: true,
+			config: &Config{
+				Okta: OktaConfig{
+					Enabled: false,
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buildType := modules.BuildOSS
+			if tt.enterprise {
+				buildType = modules.BuildEnterprise
+			}
+			modules.SetTestModules(t, &modules.TestModules{
+				TestBuildType: buildType,
+			})
+
+			process := &TeleportProcess{
+				Config: tt.config,
+			}
+
+			require.Equal(t, tt.expected, process.enterpriseServicesEnabled())
 		})
 	}
 }

@@ -43,7 +43,7 @@ export function Clusters() {
   useKeyboardShortcuts(
     useMemo(
       () => ({
-        'toggle-clusters': togglePopover,
+        openClusters: togglePopover,
       }),
       [togglePopover]
     )
@@ -102,5 +102,5 @@ export function Clusters() {
 }
 
 const Container = styled(Box)`
-  background: ${props => props.theme.colors.primary.light};
+  background: ${props => props.theme.colors.levels.surface};
 `;

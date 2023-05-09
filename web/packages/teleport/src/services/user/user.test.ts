@@ -71,6 +71,21 @@ test('undefined values in context response gives proper default values', async (
         read: false,
         remove: false,
       },
+      plugins: {
+        create: false,
+        edit: false,
+        list: false,
+        read: false,
+        remove: false,
+      },
+      integrations: {
+        list: false,
+        read: false,
+        edit: false,
+        create: false,
+        remove: false,
+        use: false,
+      },
       roles: {
         list: false,
         read: false,

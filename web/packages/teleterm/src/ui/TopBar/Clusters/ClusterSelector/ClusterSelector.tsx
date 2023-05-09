@@ -30,7 +30,7 @@ interface ClusterSelectorProps {
 
 export const ClusterSelector = forwardRef<HTMLDivElement, ClusterSelectorProps>(
   (props, ref) => {
-    const { getLabelWithShortcut } = useKeyboardShortcutFormatters();
+    const { getLabelWithAccelerator } = useKeyboardShortcutFormatters();
     const SortIcon = props.isOpened ? SortAsc : SortDesc;
     const text = props.clusterName || 'Select Cluster';
 
@@ -40,9 +40,9 @@ export const ClusterSelector = forwardRef<HTMLDivElement, ClusterSelectorProps>(
         onClick={props.onClick}
         isOpened={props.isOpened}
         isClusterSelected={!!props.clusterName}
-        title={getLabelWithShortcut(
+        title={getLabelWithAccelerator(
           [props.clusterName, 'Open Clusters'].filter(Boolean).join('\n'),
-          'toggle-clusters'
+          'openClusters'
         )}
       >
         <Text
@@ -84,7 +84,7 @@ const Container = styled.button`
   ${props => {
     if (props.isOpened) {
       return {
-        borderColor: props.theme.colors.secondary.main,
+        borderColor: props.theme.colors.brand,
         opacity: 1,
       };
     }

@@ -31,8 +31,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/arn"
-	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/rds/rdsutils"
 	"github.com/aws/aws-sdk-go/service/redshift"
 	"github.com/aws/aws-sdk-go/service/redshiftserverless"
@@ -43,7 +41,6 @@ import (
 
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/types"
-	awsutils "github.com/gravitational/teleport/api/utils/aws"
 	azureutils "github.com/gravitational/teleport/api/utils/azure"
 	"github.com/gravitational/teleport/api/utils/retryutils"
 	libauth "github.com/gravitational/teleport/lib/auth"
@@ -55,6 +52,7 @@ import (
 	dbiam "github.com/gravitational/teleport/lib/srv/db/common/iam"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
+	awsutils "github.com/gravitational/teleport/lib/utils/aws"
 )
 
 // azureVirtualMachineCacheTTL is the default TTL for Azure virtual machine
@@ -166,14 +164,15 @@ func NewAuth(config AuthConfig) (Auth, error) {
 // GetRDSAuthToken returns authorization token that will be used as a password
 // when connecting to RDS and Aurora databases.
 func (a *dbAuth) GetRDSAuthToken(sessionCtx *Session) (string, error) {
-	awsSession, err := a.cfg.Clients.GetAWSSession(sessionCtx.Database.GetAWS().Region)
+	meta := sessionCtx.Database.GetAWS()
+	awsSession, err := a.cfg.Clients.GetAWSSession(meta.Region)
 	if err != nil {
 		return "", trace.Wrap(err)
 	}
 	a.cfg.Log.Debugf("Generating RDS auth token for %s.", sessionCtx)
 	token, err := rdsutils.BuildAuthToken(
 		sessionCtx.Database.GetURI(),
-		sessionCtx.Database.GetAWS().Region,
+		meta.Region,
 		sessionCtx.DatabaseUser,
 		awsSession.Config.Credentials)
 	if err != nil {
@@ -197,13 +196,14 @@ permissions (note that IAM changes may take a few minutes to propagate):
 // GetRedshiftAuthToken returns authorization token that will be used as a
 // password when connecting to Redshift databases.
 func (a *dbAuth) GetRedshiftAuthToken(sessionCtx *Session) (string, string, error) {
-	awsSession, err := a.cfg.Clients.GetAWSSession(sessionCtx.Database.GetAWS().Region)
+	meta := sessionCtx.Database.GetAWS()
+	awsSession, err := a.cfg.Clients.GetAWSSession(meta.Region)
 	if err != nil {
 		return "", "", trace.Wrap(err)
 	}
 	a.cfg.Log.Debugf("Generating Redshift auth token for %s.", sessionCtx)
 	resp, err := redshift.New(awsSession).GetClusterCredentials(&redshift.GetClusterCredentialsInput{
-		ClusterIdentifier: aws.String(sessionCtx.Database.GetAWS().Redshift.ClusterID),
+		ClusterIdentifier: aws.String(meta.Redshift.ClusterID),
 		DbUser:            aws.String(sessionCtx.DatabaseUser),
 		DbName:            aws.String(sessionCtx.DatabaseName),
 		// TODO(r0mant): Do not auto-create database account if DbUser doesn't
@@ -238,12 +238,12 @@ func (a *dbAuth) GetRedshiftServerlessAuthToken(ctx context.Context, sessionCtx 
 	// example, an IAM role "arn:aws:iam::1234567890:role/my-role-name" will be
 	// mapped to a Postgres user "IAMR:my-role-name" inside the database. So we
 	// first need to assume this IAM role before getting auth token.
-	awsMetadata := sessionCtx.Database.GetAWS()
-	roleARN, err := redshiftServerlessUsernameToRoleARN(awsMetadata, sessionCtx.DatabaseUser)
+	meta := sessionCtx.Database.GetAWS()
+	roleARN, err := redshiftServerlessUsernameToRoleARN(meta, sessionCtx.DatabaseUser)
 	if err != nil {
 		return "", "", trace.Wrap(err)
 	}
-	client, err := a.cfg.Clients.GetAWSRedshiftServerlessClientForRole(ctx, awsMetadata.Region, roleARN)
+	client, err := a.cfg.Clients.GetAWSRedshiftServerlessClientForRole(ctx, meta.Region, roleARN)
 	if err != nil {
 		return "", "", trace.AccessDenied(`Could not generate Redshift Serverless auth token:
 
@@ -256,7 +256,7 @@ Make sure that IAM role %q has a trust relationship with Teleport database agent
 	// Now make the API call to generate the temporary credentials.
 	a.cfg.Log.Debugf("Generating Redshift Serverless auth token for %s.", sessionCtx)
 	resp, err := client.GetCredentialsWithContext(ctx, &redshiftserverless.GetCredentialsInput{
-		WorkgroupName: aws.String(awsMetadata.RedshiftServerless.WorkgroupName),
+		WorkgroupName: aws.String(meta.RedshiftServerless.WorkgroupName),
 		DbName:        aws.String(sessionCtx.DatabaseName),
 	})
 	if err != nil {
@@ -837,32 +837,11 @@ func matchAzureResourceName(resourceID, name string) bool {
 // redshiftServerlessUsernameToRoleARN converts a database username to AWS role
 // ARN for a Redshift Serverless database.
 func redshiftServerlessUsernameToRoleARN(aws types.AWS, username string) (string, error) {
-	switch {
 	// These are in-database usernames created when logged in as IAM
 	// users/roles. We will enforce Teleport users to provide IAM roles
 	// instead.
-	case strings.HasPrefix(username, "IAM:") || strings.HasPrefix(username, "IAMR:"):
+	if strings.HasPrefix(username, "IAM:") || strings.HasPrefix(username, "IAMR:") {
 		return "", trace.BadParameter("expecting name or ARN of an AWS IAM role but got %v", username)
-
-	case arn.IsARN(username):
-		if parsedARN, err := arn.Parse(username); err != nil {
-			return "", trace.Wrap(err)
-		} else if parsedARN.Service != iam.ServiceName || !strings.HasPrefix(parsedARN.Resource, "role/") {
-			return "", trace.BadParameter("expecting name or ARN of an AWS IAM role but got %v", username)
-		}
-		return username, nil
-
-	default:
-		resource := username
-		if !strings.Contains(resource, "/") {
-			resource = fmt.Sprintf("role/%s", username)
-		}
-
-		return arn.ARN{
-			Partition: awsutils.GetPartitionFromRegion(aws.Region),
-			Service:   iam.ServiceName,
-			AccountID: aws.AccountID,
-			Resource:  resource,
-		}.String(), nil
 	}
+	return awsutils.BuildRoleARN(username, aws.Region, aws.AccountID)
 }

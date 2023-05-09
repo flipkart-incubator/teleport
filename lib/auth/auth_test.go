@@ -37,7 +37,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/gravitational/license"
-	reporting "github.com/gravitational/reporting/types"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
@@ -286,10 +285,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// Login to the root cluster.
 	resp, err := s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:      pub,
 		TTL:            time.Hour,
 		RouteToCluster: s.clusterName.GetClusterName(),
 	})
@@ -325,10 +324,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// Login to the leaf cluster.
 	resp, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:         pub,
 		TTL:               time.Hour,
 		RouteToCluster:    "leaf.localhost",
 		KubernetesCluster: "leaf-kube-cluster",
@@ -373,10 +372,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// Login specifying a valid kube cluster. It should appear in the TLS cert.
 	resp, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:         pub,
 		TTL:               time.Hour,
 		RouteToCluster:    s.clusterName.GetClusterName(),
 		KubernetesCluster: "root-kube-cluster",
@@ -405,10 +404,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// automatically.
 	resp, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:      pub,
 		TTL:            time.Hour,
 		RouteToCluster: s.clusterName.GetClusterName(),
 		// Intentionally empty, auth server should default to a registered
@@ -450,10 +449,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// Login specifying a valid kube cluster. It should appear in the TLS cert.
 	resp, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:         pub,
 		TTL:               time.Hour,
 		RouteToCluster:    s.clusterName.GetClusterName(),
 		KubernetesCluster: "root-kube-cluster",
@@ -482,10 +481,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// automatically.
 	resp, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:      pub,
 		TTL:            time.Hour,
 		RouteToCluster: s.clusterName.GetClusterName(),
 		// Intentionally empty, auth server should default to a registered
@@ -515,10 +514,10 @@ func TestAuthenticateSSHUser(t *testing.T) {
 	// Login specifying an invalid kube cluster. This should fail.
 	_, err = s.a.AuthenticateSSHUser(ctx, AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Username: user,
-			Pass:     &PassCreds{Password: pass},
+			Username:  user,
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
-		PublicKey:         pub,
 		TTL:               time.Hour,
 		RouteToCluster:    s.clusterName.GetClusterName(),
 		KubernetesCluster: "invalid-kube-cluster",
@@ -1127,9 +1126,9 @@ func TestServer_AugmentContextUserCertificates(t *testing.T) {
 			Pass: &PassCreds{
 				Password: []byte(pass),
 			},
+			PublicKey: pub,
 		},
-		PublicKey: pub,
-		TTL:       1 * time.Hour,
+		TTL: 1 * time.Hour,
 	})
 	require.NoError(t, err, "AuthenticateSSHUser failed")
 
@@ -1284,9 +1283,9 @@ func TestServer_AugmentContextUserCertificates_errors(t *testing.T) {
 				Pass: &PassCreds{
 					Password: []byte(pass),
 				},
+				PublicKey: ssh.MarshalAuthorizedKey(sPubKey),
 			},
-			PublicKey: ssh.MarshalAuthorizedKey(sPubKey),
-			TTL:       1 * time.Hour,
+			TTL: 1 * time.Hour,
 		})
 		require.NoError(t, err, "AuthenticateSSHUser(%q) failed", user)
 
@@ -1751,10 +1750,10 @@ func TestGenerateUserCertIPPinning(t *testing.T) {
 
 	baseAuthRequest := AuthenticateSSHRequest{
 		AuthenticateUserRequest: AuthenticateUserRequest{
-			Pass: &PassCreds{Password: pass},
+			Pass:      &PassCreds{Password: pass},
+			PublicKey: pub,
 		},
 		TTL:            time.Hour,
-		PublicKey:      pub,
 		RouteToCluster: s.clusterName.GetClusterName(),
 	}
 
@@ -2789,42 +2788,6 @@ func TestGetLicense(t *testing.T) {
 	actual, err := s.a.GetLicense(context.Background())
 	assert.Nil(t, err)
 	assert.Equal(t, fmt.Sprintf("%s%s", l.CertPEM, l.KeyPEM), actual)
-}
-
-type mockEnforcer struct {
-	services.Enforcer
-	notifications []reporting.Notification
-}
-
-func (m mockEnforcer) GetLicenseCheckResult(ctx context.Context) (*reporting.Heartbeat, error) {
-	return &reporting.Heartbeat{
-		Spec: reporting.HeartbeatSpec{
-			Notifications: m.notifications,
-		},
-	}, nil
-}
-
-func TestEnforcerGetLicenseCheckResult(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	s := newAuthSuite(t)
-
-	expected := []reporting.Notification{
-		{
-			Type:     "test",
-			Severity: "warning",
-			Text:     "test warning",
-			HTML:     "test warning",
-		},
-	}
-
-	s.a.SetEnforcer(&mockEnforcer{
-		notifications: expected,
-	})
-
-	heartbeat, err := s.a.GetLicenseCheckResult(ctx)
-	require.NoError(t, err)
-	require.Equal(t, expected, heartbeat.Spec.Notifications)
 }
 
 func TestInstallerCRUD(t *testing.T) {

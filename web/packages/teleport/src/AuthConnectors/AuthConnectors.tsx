@@ -59,7 +59,7 @@ export function AuthConnectors(props: State) {
           width="240px"
           onClick={() => resources.create('github')}
         >
-          New Github Connector
+          New GitHub Connector
         </ButtonPrimary>
       </FeatureHeader>
       {attempt.status === 'failed' && <Alert children={attempt.statusText} />}
@@ -85,7 +85,7 @@ export function AuthConnectors(props: State) {
               <Box
                 ml="4"
                 width="240px"
-                color="text.primary"
+                color="text.main"
                 style={{ flexShrink: 0 }}
               >
                 <Text typography="h6" mb={3} caps>

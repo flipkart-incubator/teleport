@@ -44,14 +44,18 @@ import (
 	"github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/constants"
+	integrationpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/integration/v1"
+	oktapb "github.com/gravitational/teleport/api/gen/proto/go/teleport/okta/v1"
 	"github.com/gravitational/teleport/api/metadata"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/api/types/installers"
 	"github.com/gravitational/teleport/api/types/wrappers"
-	"github.com/gravitational/teleport/api/utils/keys"
+	integrationService "github.com/gravitational/teleport/lib/auth/integration/integrationv1"
+	"github.com/gravitational/teleport/lib/auth/okta"
 	wanlib "github.com/gravitational/teleport/lib/auth/webauthn"
 	"github.com/gravitational/teleport/lib/authz"
+	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/httplib"
 	"github.com/gravitational/teleport/lib/joinserver"
@@ -1338,7 +1342,20 @@ func (g *GRPCServer) UpsertApplicationServer(ctx context.Context, req *proto.Ups
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	keepAlive, err := auth.UpsertApplicationServer(ctx, req.GetServer())
+	server := req.GetServer()
+	app := server.GetApp()
+
+	// Only allow app servers with Okta origins if coming from an Okta role. App servers sourced from
+	// Okta are redirected differently which could create unpredictable or insecure behavior if applied
+	// to non-Okta apps.
+	hasOktaOrigin := server.Origin() == types.OriginOkta || app.Origin() == types.OriginOkta
+	if builtinRole, ok := auth.context.Identity.(authz.BuiltinRole); !ok || builtinRole.Role != types.RoleOkta {
+		if hasOktaOrigin {
+			return nil, trace.BadParameter("only the Okta role can create app servers and apps with an Okta origin")
+		}
+	}
+
+	keepAlive, err := auth.UpsertApplicationServer(ctx, server)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -2569,9 +2586,36 @@ func (g *GRPCServer) GenerateUserSingleUseCerts(stream proto.AuthService_Generat
 		return trace.Wrap(err)
 	}
 
+	mfaRequired := proto.MFARequired_MFA_REQUIRED_UNSPECIFIED
+	clusterName, err := actx.GetClusterName()
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	// Only check if MFA is required for resources within the current cluster. Determining if
+	// MFA is required for a resource in a leaf cluster will result in a not found error and
+	// prevent users from accessing resources in leaf clusters.
+	if initReq.RouteToCluster == "" || clusterName.GetClusterName() == initReq.RouteToCluster {
+		if required, err := isMFARequiredForSingleUseCertRequest(ctx, actx, initReq); err == nil {
+			// If MFA is not required to gain access to the resource then let the client
+			// know and abort the ceremony.
+			if !required {
+				return trace.Wrap(stream.Send(&proto.UserSingleUseCertsResponse{
+					Response: &proto.UserSingleUseCertsResponse_MFAChallenge{
+						MFAChallenge: &proto.MFAAuthenticateChallenge{
+							MFARequired: proto.MFARequired_MFA_REQUIRED_NO,
+						},
+					},
+				}))
+			}
+
+			mfaRequired = proto.MFARequired_MFA_REQUIRED_YES
+		}
+	}
+
 	// 2. send MFAChallenge
 	// 3. receive and validate MFAResponse
-	mfaDev, err := userSingleUseCertsAuthChallenge(actx, stream)
+	mfaDev, err := userSingleUseCertsAuthChallenge(actx, stream, mfaRequired)
 	if err != nil {
 		g.Entry.Debugf("Failed to perform single-use cert challenge: %v", err)
 		return trace.Wrap(err)
@@ -2640,6 +2684,38 @@ func validateUserSingleUseCertRequest(ctx context.Context, actx *grpcContext, re
 	return nil
 }
 
+// isMFARequiredForSingleUseCertRequest validates that mfa is actually required for
+// the target of the single-use user cert.
+func isMFARequiredForSingleUseCertRequest(ctx context.Context, actx *grpcContext, req *proto.UserCertsRequest) (bool, error) {
+	mfaReq := &proto.IsMFARequiredRequest{}
+
+	switch req.Usage {
+	case proto.UserCertsRequest_SSH:
+		// An old or non-conforming client did not provide a login which means rbac
+		// won't be able to accurately determine if mfa is required.
+		if req.SSHLogin == "" {
+			return false, trace.BadParameter("no ssh login provided")
+		}
+
+		mfaReq.Target = &proto.IsMFARequiredRequest_Node{Node: &proto.NodeLogin{Node: req.NodeName, Login: req.SSHLogin}}
+	case proto.UserCertsRequest_Kubernetes:
+		mfaReq.Target = &proto.IsMFARequiredRequest_KubernetesCluster{KubernetesCluster: req.KubernetesCluster}
+	case proto.UserCertsRequest_Database:
+		mfaReq.Target = &proto.IsMFARequiredRequest_Database{Database: &req.RouteToDatabase}
+	case proto.UserCertsRequest_WindowsDesktop:
+		mfaReq.Target = &proto.IsMFARequiredRequest_WindowsDesktop{WindowsDesktop: &req.RouteToWindowsDesktop}
+	default:
+		return false, trace.BadParameter("unknown certificate Usage %q", req.Usage)
+	}
+
+	resp, err := actx.IsMFARequired(ctx, mfaReq)
+	if err != nil {
+		return false, trace.Wrap(err)
+	}
+
+	return resp.Required, nil
+}
+
 // isDBLocalProxyTunnelCertReq returns whether a cert request is for
 // a database cert and the requester is a local proxy tunnel.
 func isDBLocalProxyTunnelCertReq(req *proto.UserCertsRequest) bool {
@@ -2647,7 +2723,11 @@ func isDBLocalProxyTunnelCertReq(req *proto.UserCertsRequest) bool {
 		req.RequesterName == proto.UserCertsRequest_TSH_DB_LOCAL_PROXY_TUNNEL
 }
 
-func userSingleUseCertsAuthChallenge(gctx *grpcContext, stream proto.AuthService_GenerateUserSingleUseCertsServer) (*types.MFADevice, error) {
+// ErrNoMFADevices is returned when an MFA ceremony is performed without possible devices to
+// complete the challenge with.
+var ErrNoMFADevices = trace.AccessDenied("MFA is required to access this resource but user has no MFA devices; use 'tsh mfa add' to register MFA devices")
+
+func userSingleUseCertsAuthChallenge(gctx *grpcContext, stream proto.AuthService_GenerateUserSingleUseCertsServer, mfaRequired proto.MFARequired) (*types.MFADevice, error) {
 	ctx := stream.Context()
 	auth := gctx.authServer
 	user := gctx.User.GetName()
@@ -2658,8 +2738,11 @@ func userSingleUseCertsAuthChallenge(gctx *grpcContext, stream proto.AuthService
 		return nil, trace.Wrap(err)
 	}
 	if challenge.TOTP == nil && challenge.WebauthnChallenge == nil {
-		return nil, trace.AccessDenied("MFA is required to access this resource but user has no MFA devices; use 'tsh mfa add' to register MFA devices")
+		return nil, ErrNoMFADevices
 	}
+
+	challenge.MFARequired = mfaRequired
+
 	if err := stream.Send(&proto.UserSingleUseCertsResponse{
 		Response: &proto.UserSingleUseCertsResponse_MFAChallenge{MFAChallenge: challenge},
 	}); err != nil {
@@ -2917,7 +3000,7 @@ func (g *GRPCServer) GetGithubConnector(ctx context.Context, req *types.Resource
 	}
 	githubConnectorV3, ok := gc.(*types.GithubConnectorV3)
 	if !ok {
-		return nil, trace.Errorf("encountered unexpected Github connector type: %T", gc)
+		return nil, trace.Errorf("encountered unexpected GitHub connector type: %T", gc)
 	}
 	return githubConnectorV3, nil
 }
@@ -2936,7 +3019,7 @@ func (g *GRPCServer) GetGithubConnectors(ctx context.Context, req *types.Resourc
 	for i, gc := range gcs {
 		var ok bool
 		if githubConnectorsV3[i], ok = gc.(*types.GithubConnectorV3); !ok {
-			return nil, trace.Errorf("encountered unexpected Github connector type: %T", gc)
+			return nil, trace.Errorf("encountered unexpected GitHub connector type: %T", gc)
 		}
 	}
 	return &types.GithubConnectorV3List{
@@ -4236,6 +4319,13 @@ func (g *GRPCServer) ListResources(ctx context.Context, req *proto.ListResources
 			}
 
 			protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_KubeCluster{KubeCluster: cluster}}
+		case types.KindUserGroup:
+			userGroup, ok := resource.(*types.UserGroupV1)
+			if !ok {
+				return nil, trace.BadParameter("user group has invalid type %T", resource)
+			}
+
+			protoResource = &proto.PaginatedResource{Resource: &proto.PaginatedResource_UserGroup{UserGroup: userGroup}}
 		default:
 			return nil, trace.NotImplemented("resource type %s doesn't support pagination", req.ResourceType)
 		}
@@ -4909,6 +4999,33 @@ func (g *GRPCServer) DeleteAllUserGroups(ctx context.Context, _ *emptypb.Empty) 
 	return &emptypb.Empty{}, trace.Wrap(auth.DeleteAllUserGroups(ctx))
 }
 
+// UpdateHeadlessAuthenticationState updates a headless authentication state.
+func (g *GRPCServer) UpdateHeadlessAuthenticationState(ctx context.Context, req *proto.UpdateHeadlessAuthenticationStateRequest) (*emptypb.Empty, error) {
+	auth, err := g.authenticate(ctx)
+	if err != nil {
+		return &emptypb.Empty{}, trace.Wrap(err)
+	}
+
+	err = auth.UpdateHeadlessAuthenticationState(ctx, req.Id, req.State, req.MfaResponse)
+	return &emptypb.Empty{}, trace.Wrap(err)
+}
+
+// GetHeadlessAuthentication retrieves a headless authentication by id.
+func (g *GRPCServer) GetHeadlessAuthentication(ctx context.Context, req *proto.GetHeadlessAuthenticationRequest) (*types.HeadlessAuthentication, error) {
+	auth, err := g.authenticate(ctx)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	authReq, err := auth.GetHeadlessAuthentication(ctx, req.Id)
+	return authReq, trace.Wrap(err)
+}
+
+// GetBackend returns the backend from the underlying auth server.
+func (g *GRPCServer) GetBackend() backend.Backend {
+	return g.AuthServer.bk
+}
+
 // GRPCServerConfig specifies GRPC server configuration
 type GRPCServerConfig struct {
 	// APIConfig is GRPC server API configuration
@@ -4987,6 +5104,27 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 	joinServiceServer := joinserver.NewJoinServiceGRPCServer(serverWithNopRole)
 	proto.RegisterJoinServiceServer(server, joinServiceServer)
 
+	oktaServiceServer, err := okta.NewService(okta.ServiceConfig{
+		Backend:    cfg.AuthServer.bk,
+		Authorizer: cfg.Authorizer,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	oktapb.RegisterOktaServiceServer(server, oktaServiceServer)
+
+	integrationServiceServer, err := integrationService.NewService(&integrationService.ServiceConfig{
+		Authorizer: cfg.Authorizer,
+		Backend:    cfg.AuthServer.Services,
+		Cache:      cfg.AuthServer.Cache,
+		Clock:      cfg.AuthServer.clock,
+		CAGetter:   cfg.AuthServer,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	integrationpb.RegisterIntegrationServiceServer(server, integrationServiceServer)
+
 	return authServer, nil
 }
 
@@ -5025,25 +5163,7 @@ func (g *GRPCServer) authenticate(ctx context.Context) (*grpcContext, error) {
 	// HTTPS server expects auth context to be set by the auth middleware
 	authContext, err := g.Authorizer.Authorize(ctx)
 	if err != nil {
-		switch {
-		// propagate connection problem error so we can differentiate
-		// between connection failed and access denied
-		case trace.IsConnectionProblem(err):
-			return nil, trace.ConnectionProblem(err, "[10] failed to connect to the database")
-		case trace.IsNotFound(err):
-			// user not found, wrap error with access denied
-			return nil, trace.Wrap(err, "[10] access denied")
-		case trace.IsAccessDenied(err):
-			// don't print stack trace, just log the warning
-			log.Warn(err)
-		case keys.IsPrivateKeyPolicyError(err):
-			// private key policy errors should be returned to the client
-			// unaltered so that they know to reauthenticate with a valid key.
-			return nil, trace.Unwrap(err)
-		default:
-			log.Warn(trace.DebugReport(err))
-		}
-		return nil, trace.AccessDenied("[10] access denied")
+		return nil, authz.ConvertAuthorizerError(ctx, g.Logger, err)
 	}
 	return &grpcContext{
 		Context: authContext,

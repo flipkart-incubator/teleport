@@ -29,6 +29,7 @@ type access struct {
 	Edit   bool `json:"edit"`
 	Create bool `json:"create"`
 	Delete bool `json:"remove"`
+	Use    bool `json:"use"`
 }
 
 type accessStrategy struct {
@@ -93,6 +94,10 @@ type userACL struct {
 	Download access `json:"download"`
 	// Download defines whether the user has access to download the license
 	License access `json:"license"`
+	// Plugins defines whether the user has access to manage hosted plugin instances
+	Plugins access `json:"plugins"`
+	// Integrations defines whether the user has access to manage integrations.
+	Integrations access `json:"integrations"`
 }
 
 type authType string
@@ -139,6 +144,7 @@ func newAccess(roleSet services.RoleSet, ctx *services.Context, kind string) acc
 		Edit:   hasAccess(roleSet, ctx, kind, types.VerbUpdate),
 		Create: hasAccess(roleSet, ctx, kind, types.VerbCreate),
 		Delete: hasAccess(roleSet, ctx, kind, types.VerbDelete),
+		Use:    hasAccess(roleSet, ctx, kind, types.VerbUse),
 	}
 }
 
@@ -191,12 +197,18 @@ func NewUserContext(user types.User, userRoles services.RoleSet, features proto.
 		billingAccess = newAccess(userRoles, ctx, types.KindBilling)
 	}
 
+	var pluginsAccess access
+	if features.Plugins {
+		pluginsAccess = newAccess(userRoles, ctx, types.KindPlugin)
+	}
+
 	accessStrategy := getAccessStrategy(userRoles)
 	clipboard := userRoles.DesktopClipboard()
 	desktopSessionRecording := desktopRecordingEnabled && userRoles.RecordDesktopSession()
 	directorySharing := userRoles.DesktopDirectorySharing()
 	download := newAccess(userRoles, ctx, types.KindDownload)
 	license := newAccess(userRoles, ctx, types.KindLicense)
+	integrationsAccess := newAccess(userRoles, ctx, types.KindIntegration)
 
 	acl := userACL{
 		AccessRequests:          requestAccess,
@@ -221,6 +233,8 @@ func NewUserContext(user types.User, userRoles services.RoleSet, features proto.
 		DirectorySharing:        directorySharing,
 		Download:                download,
 		License:                 license,
+		Plugins:                 pluginsAccess,
+		Integrations:            integrationsAccess,
 	}
 
 	// local user

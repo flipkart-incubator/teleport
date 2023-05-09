@@ -78,6 +78,7 @@ import (
 	"github.com/gravitational/teleport/lib/sshutils/x11"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
+	"github.com/gravitational/teleport/lib/utils/mlock"
 	"github.com/gravitational/teleport/lib/utils/prompt"
 	"github.com/gravitational/teleport/tool/common"
 )
@@ -326,6 +327,9 @@ type CLIConf struct {
 	// mockSSOLogin used in tests to override sso login handler in teleport client.
 	mockSSOLogin client.SSOLoginFunc
 
+	// mockHeadlessLogin used in tests to override Headless login handler in teleport client.
+	mockHeadlessLogin client.SSHLoginFunc
+
 	// HomePath is where tsh stores profiles
 	HomePath string
 
@@ -335,12 +339,16 @@ type CLIConf struct {
 	// LocalProxyPort is a port used by local proxy listener.
 	LocalProxyPort string
 	// LocalProxyCertFile is the client certificate used by local proxy.
+	// DEPRECATED DELETE IN 14.0
 	LocalProxyCertFile string
 	// LocalProxyKeyFile is the client key used by local proxy.
+	// DEPRECATED DELETE IN 14.0
 	LocalProxyKeyFile string
 	// LocalProxyTunnel specifies whether local proxy will open auth'd tunnel.
 	LocalProxyTunnel bool
 
+	// Exec is the command to run via tsh aws.
+	Exec string
 	// AWSRole is Amazon Role ARN or role name that will be used for AWS CLI access.
 	AWSRole string
 	// AWSCommandArgs contains arguments that will be forwarded to AWS CLI binary.
@@ -428,6 +436,16 @@ type CLIConf struct {
 
 	// tracer is the tracer used to trace tsh commands.
 	tracer oteltrace.Tracer
+
+	// Headless uses headless login for the client session.
+	Headless bool
+
+	// MlockMode determines whether the process memory will be locked, and whether errors will be enforced.
+	// Allowed values include false, strict, and best_effort.
+	MlockMode string
+
+	// HeadlessAuthenticationID is the ID of a headless authentication.
+	HeadlessAuthenticationID string
 }
 
 // Stdout returns the stdout writer.
@@ -503,6 +521,7 @@ const (
 	loginEnvVar       = "TELEPORT_LOGIN"
 	bindAddrEnvVar    = "TELEPORT_LOGIN_BIND_ADDR"
 	proxyEnvVar       = "TELEPORT_PROXY"
+	headlessEnvVar    = "TELEPORT_HEADLESS"
 	// TELEPORT_SITE uses the older deprecated "site" terminology to refer to a
 	// cluster. All new code should use TELEPORT_CLUSTER instead.
 	siteEnvVar             = "TELEPORT_SITE"
@@ -511,6 +530,7 @@ const (
 	useLocalSSHAgentEnvVar = "TELEPORT_USE_LOCAL_SSH_AGENT"
 	globalTshConfigEnvVar  = "TELEPORT_GLOBAL_TSH_CONFIG"
 	mfaModeEnvVar          = "TELEPORT_MFA_MODE"
+	mlockModeEnvVar        = "TELEPORT_MLOCK_MODE"
 	debugEnvVar            = teleport.VerboseLogsEnvVar // "TELEPORT_DEBUG"
 	identityFileEnvVar     = "TELEPORT_IDENTITY_FILE"
 	gcloudSecretEnvVar     = "TELEPORT_GCLOUD_SECRET"
@@ -568,10 +588,9 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 	app := utils.InitCLIParser("tsh", "Teleport Command Line Client").Interspersed(true)
 
 	app.Flag("login", "Remote host login").Short('l').Envar(loginEnvVar).StringVar(&cf.NodeLogin)
-	localUser, _ := client.Username()
 	app.Flag("proxy", "Teleport proxy address").Envar(proxyEnvVar).StringVar(&cf.Proxy)
 	app.Flag("nocache", "do not cache cluster discovery locally").Hidden().BoolVar(&cf.NoCache)
-	app.Flag("user", fmt.Sprintf("Teleport user [%s]", localUser)).Envar(userEnvVar).StringVar(&cf.Username)
+	app.Flag("user", "Teleport user, defaults to current local user").Envar(userEnvVar).StringVar(&cf.Username)
 	app.Flag("mem-profile", "Write memory profile to file").Hidden().StringVar(&memProfile)
 	app.Flag("cpu-profile", "Write CPU profile to file").Hidden().StringVar(&cpuProfile)
 	app.Flag("trace-profile", "Write trace profile to file").Hidden().StringVar(&traceProfile)
@@ -615,6 +634,11 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 		Default(mfaModeAuto).
 		Envar(mfaModeEnvVar).
 		EnumVar(&cf.MFAMode, modes...)
+	app.Flag("headless", "Use headless login. Shorthand for --auth=headless.").Envar(headlessEnvVar).BoolVar(&cf.Headless)
+	app.Flag("mlock", fmt.Sprintf("Determines whether process memory will be locked and whether failure to do so will be accepted (%v).", strings.Join(mlockModes, ", "))).
+		Default(mlockModeAuto).
+		Envar(mlockModeEnvVar).
+		StringVar(&cf.MlockMode)
 	app.HelpFlag.Short('h')
 
 	ver := app.Command("version", "Print the tsh client and Proxy server versions for the current context.")
@@ -659,6 +683,7 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 	aws.Flag("app", "Optional Name of the AWS application to use if logged into multiple.").StringVar(&cf.AppName)
 	aws.Flag("endpoint-url", "Run local proxy to serve as an AWS endpoint URL. If not specified, local proxy serves as an HTTPS proxy.").
 		Short('e').Hidden().BoolVar(&cf.AWSEndpointURLMode)
+	aws.Flag("exec", "Execute different commands (e.g. terraform) under Teleport credentials").StringVar(&cf.Exec)
 
 	azure := app.Command("az", "Access Azure API.").Interspersed(false)
 	azure.Arg("command", "`az` command and subcommands arguments that are going to be forwarded to Azure CLI.").StringsVar(&cf.AzureCommandArgs)
@@ -910,6 +935,11 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 	reqSearch.Flag("kube-namespace", "Kubernetes Namespace to search for Pods").Default(corev1.NamespaceDefault).StringVar(&cf.kubeNamespace)
 	reqSearch.Flag("all-kube-namespaces", "Search Pods in every namespace").BoolVar(&cf.kubeAllNamespaces)
 
+	// Headless login approval
+	headless := app.Command("headless", "Headless authentication commands.").Interspersed(true)
+	approve := headless.Command("approve", "Approve a headless authentication request.").Interspersed(true)
+	approve.Arg("request id", "Headless authentication request ID").StringVar(&cf.HeadlessAuthenticationID)
+
 	reqDrop := req.Command("drop", "Drop one more access requests from current identity")
 	reqDrop.Arg("request-id", "IDs of requests to drop (default drops all requests)").Default("*").StringsVar(&cf.RequestIDs)
 	kubectl := app.Command("kubectl", "Runs a kubectl command on a Kubernetes cluster").Interspersed(false)
@@ -1117,6 +1147,13 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 	case show.FullCommand():
 		err = onShow(&cf)
 	case status.FullCommand():
+		// onStatus can be invoked directly with `tsh status` but is also
+		// invoked from other commands. When invoked directly, we use a
+		// context with a short timeout to prevent the command from taking
+		// too long due to fetching alerts on slow networks.
+		var cancel context.CancelFunc
+		cf.Context, cancel = context.WithTimeout(cf.Context, constants.TimeoutGetClusterAlerts)
+		defer cancel()
 		err = onStatus(&cf)
 	case lsApps.FullCommand():
 		err = onApps(&cf)
@@ -1215,6 +1252,8 @@ func Run(ctx context.Context, args []string, opts ...cliOption) error {
 	case kubectl.FullCommand():
 		idx := slices.Index(args, kubectl.FullCommand())
 		err = onKubectlCommand(&cf, args[idx:])
+	case approve.FullCommand():
+		err = onHeadlessApprove(&cf)
 	default:
 		// Handle commands that might not be available.
 		switch {
@@ -1698,11 +1737,6 @@ func onLogin(cf *CLIConf) error {
 		}
 	}
 
-	pingResp, err := tc.Ping(cf.Context)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	// Regular login without -i flag.
 	if err := tc.SaveProfile(true); err != nil {
 		return trace.Wrap(err)
@@ -1767,11 +1801,6 @@ func onLogin(cf *CLIConf) error {
 	// Print status to show information of the logged in user.
 	if err := onStatus(cf); err != nil {
 		return trace.Wrap(err)
-	}
-
-	// Display any license compliance warnings
-	for _, warning := range pingResp.LicenseWarnings {
-		fmt.Fprintf(os.Stderr, "%s\n\n", warning)
 	}
 
 	// Show on-login alerts, all high severity alerts are shown by onStatus
@@ -1923,6 +1952,8 @@ func onListNodes(cf *CLIConf) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
+	tc.AllowHeadless = true
 
 	// Get list of all nodes in backend and sort by "Node Name".
 	var nodes []types.Server
@@ -2673,7 +2704,6 @@ func getDatabaseRow(proxy, cluster, clusterFlag string, database types.Database,
 			formatUsersForDB(database, roleSet),
 			database.LabelsString(),
 			connect,
-			database.Expiry().Format(constants.HumanDateFormatSeconds),
 		)
 	} else {
 		row = append(row,
@@ -2700,7 +2730,7 @@ func showDatabasesAsText(w io.Writer, clusterFlag string, databases []types.Data
 	}
 	var t asciitable.Table
 	if verbose {
-		t = asciitable.MakeTable([]string{"Name", "Description", "Protocol", "Type", "URI", "Allowed Users", "Labels", "Connect", "Expires"}, rows...)
+		t = asciitable.MakeTable([]string{"Name", "Description", "Protocol", "Type", "URI", "Allowed Users", "Labels", "Connect"}, rows...)
 	} else {
 		t = asciitable.MakeTableWithTruncatedColumn([]string{"Name", "Description", "Allowed Users", "Labels", "Connect"}, rows, "Labels")
 	}
@@ -3008,6 +3038,8 @@ func onSSH(cf *CLIConf) error {
 		return trace.Wrap(err)
 	}
 
+	tc.AllowHeadless = true
+
 	tc.Stdin = os.Stdin
 	err = retryWithAccessRequest(cf, tc, func() error {
 		err = client.RetryWithRelogin(cf.Context, tc, func() error {
@@ -3126,6 +3158,8 @@ func onSCP(cf *CLIConf) error {
 		return trace.Wrap(err)
 	}
 
+	tc.AllowHeadless = true
+
 	// allow the file transfer to be gracefully stopped if the user wishes
 	ctx, cancel := signal.NotifyContext(cf.Context, os.Interrupt)
 	cf.Context = ctx
@@ -3142,7 +3176,6 @@ func onSCP(cf *CLIConf) error {
 	if err == nil || (err != nil && errors.Is(err, context.Canceled)) {
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, utils.UserMessageFromError(err))
 
 	return trace.Wrap(err)
 }
@@ -3239,6 +3272,21 @@ func makeClientForProxy(cf *CLIConf, proxy string, useProfileLogin bool) (*clien
 		c.JumpHosts = hosts
 	}
 
+	// --headless is shorthand for --auth=headless
+	if cf.Headless {
+		if cf.AuthConnector != "" && cf.AuthConnector != constants.HeadlessConnector {
+			return nil, trace.BadParameter("either --headless or --auth can be specified, not both")
+		}
+		cf.AuthConnector = constants.HeadlessConnector
+		if !cf.ExplicitUsername {
+			return nil, trace.BadParameter("user must be set explicitly for headless login with the --user flag or $TELEPORT_USER env variable")
+		}
+	}
+
+	if err := tryLockMemory(cf); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	c.ClientStore, err = initClientStore(cf, proxy)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -3317,7 +3365,7 @@ func makeClientForProxy(cf *CLIConf, proxy string, useProfileLogin bool) (*clien
 	// If a TTY was requested, make sure to allocate it. Note this applies to
 	// "exec" command because a shell always has a TTY allocated.
 	if cf.Interactive || options.RequestTTY {
-		c.Interactive = true
+		c.InteractiveCommand = true
 	}
 
 	if !cf.NoCache {
@@ -3383,6 +3431,7 @@ func makeClientForProxy(cf *CLIConf, proxy string, useProfileLogin bool) (*clien
 
 	// pass along mock sso login if provided (only used in tests)
 	c.MockSSOLogin = cf.mockSSOLogin
+	c.MockHeadlessLogin = cf.mockHeadlessLogin
 
 	// Set tsh home directory
 	c.HomePath = cf.HomePath
@@ -3392,7 +3441,7 @@ func makeClientForProxy(cf *CLIConf, proxy string, useProfileLogin bool) (*clien
 	}
 
 	if cf.IdentityFileIn != "" {
-		c.SkipLocalAuth = true
+		c.NonInteractive = true
 	}
 
 	tc, err := client.NewClient(c)
@@ -3439,28 +3488,29 @@ func makeClientForProxy(cf *CLIConf, proxy string, useProfileLogin bool) (*clien
 }
 
 func initClientStore(cf *CLIConf, proxy string) (*client.Store, error) {
-	if cf.IdentityFileIn != "" {
-		keyStore, err := identityfile.NewClientStoreFromIdentityFile(cf.IdentityFileIn, proxy, cf.SiteName)
+	switch {
+	case cf.IdentityFileIn != "":
+		// Import identity file keys to in-memory client store.
+		clientStore, err := identityfile.NewClientStoreFromIdentityFile(cf.IdentityFileIn, proxy, cf.SiteName)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-		return keyStore, nil
-	}
+		return clientStore, nil
 
-	// When logging in with an identity file output, we want to avoid writing
-	// any keys to disk, so we use a full memory client store.
-	if cf.IdentityFileOut != "" {
+	case cf.IdentityFileOut != "", cf.AuthConnector == constants.HeadlessConnector:
+		// Store client keys in memory, where they can be exported to non-standard
+		// FS formats (e.g. identity file) or used for a single client call in memory.
 		return client.NewMemClientStore(), nil
-	}
 
-	clientStore := client.NewFSClientStore(cf.HomePath)
-
-	// Store client keys in memory, but still save trusted certs and profile to disk.
-	if cf.AddKeysToAgent == client.AddKeysToAgentOnly {
+	case cf.AddKeysToAgent == client.AddKeysToAgentOnly:
+		// Store client keys in memory, but save trusted certs and profile to disk.
+		clientStore := client.NewFSClientStore(cf.HomePath)
 		clientStore.KeyStore = client.NewMemKeyStore()
-	}
+		return clientStore, nil
 
-	return clientStore, nil
+	default:
+		return client.NewFSClientStore(cf.HomePath), nil
+	}
 }
 
 func (c *CLIConf) ProfileStatus() (*client.ProfileStatus, error) {
@@ -3669,10 +3719,14 @@ func onShow(cf *CLIConf) error {
 // printStatus prints the status of the profile.
 func printStatus(debug bool, p *profileInfo, env map[string]string, isActive bool) {
 	var prefix string
-	duration := time.Until(p.ValidUntil)
 	humanDuration := "EXPIRED"
+	duration := time.Until(p.ValidUntil)
 	if duration.Nanoseconds() > 0 {
 		humanDuration = fmt.Sprintf("valid for %v", duration.Round(time.Minute))
+		// If certificate is valid for less than a minute, display "<1m" instead of "0s".
+		if duration < time.Minute {
+			humanDuration = "valid for <1m"
+		}
 	}
 
 	proxyURL := p.getProxyURLLine(isActive, env)
@@ -3705,7 +3759,9 @@ func printStatus(debug bool, p *profileInfo, env map[string]string, isActive boo
 			count = count + 1
 		}
 	}
-	fmt.Printf("  Logins:             %v\n", strings.Join(p.Logins, ", "))
+	if len(p.Logins) > 0 {
+		fmt.Printf("  Logins:             %v\n", strings.Join(p.Logins, ", "))
+	}
 	if p.KubernetesEnabled {
 		fmt.Printf("  Kubernetes:         enabled\n")
 		if kubeCluster != "" {
@@ -3838,6 +3894,22 @@ func makeProfileInfo(p *client.ProfileStatus, env map[string]string, isActive bo
 	if p == nil {
 		return nil
 	}
+
+	// Filter out login names that were added internally.
+	// These are for internal use and are not valid UNIX login names
+	// because they start with a hyphen.
+	var logins []string
+	for _, login := range p.Logins {
+		// Specifically filters out these:
+		//   - api/constants.NoLoginPrefix
+		//   - teleport/constants.SSHSessionJoinPrincipal
+		isTeleportDefinedLogin := strings.HasPrefix(login, "-teleport-")
+
+		if !isTeleportDefinedLogin {
+			logins = append(logins, login)
+		}
+	}
+
 	out := &profileInfo{
 		ProxyURL:           p.ProxyURL.String(),
 		Username:           p.Username,
@@ -3845,7 +3917,7 @@ func makeProfileInfo(p *client.ProfileStatus, env map[string]string, isActive bo
 		Cluster:            p.Cluster,
 		Roles:              p.Roles,
 		Traits:             p.Traits,
-		Logins:             p.Logins,
+		Logins:             logins,
 		KubernetesEnabled:  p.KubeEnabled,
 		KubernetesCluster:  selectedKubeCluster(p.Cluster),
 		KubernetesUsers:    p.KubeUsers,
@@ -4387,50 +4459,37 @@ func serializeEnvironment(profile *client.ProfileStatus, format string) (string,
 type envGetter func(string) string
 
 // setEnvFlags sets flags that can be set via environment variables.
-func setEnvFlags(cf *CLIConf, fn envGetter) {
-	// prioritize CLI input
-	if cf.SiteName == "" {
-		setSiteNameFromEnv(cf, fn)
-	}
-	// prioritize CLI input
-	if cf.KubernetesCluster == "" {
-		setKubernetesClusterFromEnv(cf, fn)
-	}
-
+func setEnvFlags(cf *CLIConf, getEnv envGetter) {
 	// these can only be set with env vars.
-	setTeleportHomeFromEnv(cf, fn)
-	setGlobalTshConfigPathFromEnv(cf, fn)
-}
-
-// setSiteNameFromEnv sets teleport site name from environment if configured.
-// First try reading TELEPORT_CLUSTER, then the legacy term TELEPORT_SITE.
-func setSiteNameFromEnv(cf *CLIConf, fn envGetter) {
-	if clusterName := fn(siteEnvVar); clusterName != "" {
-		cf.SiteName = clusterName
-	}
-	if clusterName := fn(clusterEnvVar); clusterName != "" {
-		cf.SiteName = clusterName
-	}
-}
-
-// setTeleportHomeFromEnv sets home directory from environment if configured.
-func setTeleportHomeFromEnv(cf *CLIConf, fn envGetter) {
-	if homeDir := fn(types.HomeEnvVar); homeDir != "" {
+	if homeDir := getEnv(types.HomeEnvVar); homeDir != "" {
 		cf.HomePath = path.Clean(homeDir)
 	}
-}
-
-// setKubernetesClusterFromEnv sets teleport kube cluster from environment if configured.
-func setKubernetesClusterFromEnv(cf *CLIConf, fn envGetter) {
-	if kubeName := fn(kubeClusterEnvVar); kubeName != "" {
-		cf.KubernetesCluster = kubeName
-	}
-}
-
-// setGlobalTshConfigPathFromEnv sets path to global tsh config file.
-func setGlobalTshConfigPathFromEnv(cf *CLIConf, fn envGetter) {
-	if configPath := fn(globalTshConfigEnvVar); configPath != "" {
+	if configPath := getEnv(globalTshConfigEnvVar); configPath != "" {
 		cf.GlobalTshConfigPath = path.Clean(configPath)
+	}
+
+	// prioritize CLI input for the rest.
+	if cf.SiteName == "" {
+		// check cluster env variables in order of priority.
+		if clusterName := getEnv(clusterEnvVar); clusterName != "" {
+			cf.SiteName = clusterName
+		} else if clusterName = getEnv(siteEnvVar); clusterName != "" {
+			cf.SiteName = clusterName
+		} else if clusterName = getEnv(teleport.SSHTeleportClusterName); clusterName != "" {
+			cf.SiteName = clusterName
+		}
+	}
+
+	if cf.KubernetesCluster == "" {
+		cf.KubernetesCluster = getEnv(kubeClusterEnvVar)
+	}
+
+	if cf.Username == "" {
+		cf.Username = getEnv(teleport.SSHTeleportUser)
+	}
+
+	if cf.Proxy == "" {
+		cf.Proxy = getEnv(teleport.SSHSessionWebproxyAddr)
 	}
 }
 
@@ -4532,6 +4591,68 @@ func updateKubeConfigOnLogin(cf *CLIConf, tc *client.TeleportClient, path string
 	if len(cf.KubernetesCluster) == 0 {
 		return nil
 	}
-	err := updateKubeConfig(cf, tc, "")
+	err := updateKubeConfig(cf, tc, "" /* update the default kubeconfig */, "" /* do not override the context name */)
 	return trace.Wrap(err)
+}
+
+// onHeadlessApprove executes 'tsh headless approve' command
+func onHeadlessApprove(cf *CLIConf) error {
+	tc, err := makeClient(cf, false)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	tc.Stdin = os.Stdin
+	err = client.RetryWithRelogin(cf.Context, tc, func() error {
+		return tc.HeadlessApprove(cf.Context, cf.HeadlessAuthenticationID)
+	})
+	return trace.Wrap(err)
+}
+
+var mlockModes = []string{mlockModeNo, mlockModeAuto, mlockModeBestEffort, mlockModeStrict}
+
+const (
+	// mlockModeNo disables locking process memory.
+	mlockModeNo = "off"
+	// mlockModeAuto automatically chooses whether memory locking will be attempted and/or enforced.
+	mlockModeAuto = "auto"
+	// mlockBestEfforts enables locking process memory, but errors will be ignored and logged.
+	mlockModeBestEffort = "best_effort"
+	// mlockModeStrict enables locking process memory and enforces it succeeds without errors.
+	mlockModeStrict = "strict"
+
+	// mlockFailureMessage is a user readable message for mlock errors and debug logs.
+	mlockFailureMessage = "Failed to lock process memory for headless login. " +
+		"Memory locking is used to prevent secrets in memory from being swapped to disk. " +
+		"Please ensure that memory locking is available on your system and your user has " +
+		"locking privileges. This means using a Linux operating system and increasing your " +
+		`user's memory locking limit to unlimited if needed. Alternatively, set --mlock=off ` +
+		"or TELEPORT_MLOCK_MODE=off to disable it. This is not recommended in production " +
+		"environments on shared systems where a memory swap attack is possible.\n" +
+		"https://goteleport.com/docs/access-controls/guides/headless/#troubleshooting"
+)
+
+// Lock the process memory to prevent rsa keys and certificates in memory from being exposed in a swap.
+func tryLockMemory(cf *CLIConf) error {
+	if cf.MlockMode == mlockModeAuto {
+		if cf.AuthConnector == constants.HeadlessConnector {
+			// default to best effort for headless login.
+			cf.MlockMode = mlockModeBestEffort
+		}
+	}
+
+	switch cf.MlockMode {
+	case mlockModeNo, mlockModeAuto, "":
+		// noop
+		return nil
+	case mlockModeStrict:
+		err := mlock.LockMemory()
+		return trace.Wrap(err, mlockFailureMessage)
+	case mlockModeBestEffort:
+		err := mlock.LockMemory()
+		log.WithError(err).Warning(mlockFailureMessage)
+		return nil
+	default:
+		return trace.BadParameter("unexpected value for --mlock, expected one of (%v)", strings.Join(mlockModes, ", "))
+	}
 }

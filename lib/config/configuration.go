@@ -27,6 +27,7 @@ import (
 	"io"
 	stdlog "log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -459,6 +460,12 @@ func ApplyFileConfig(fc *FileConfig, cfg *service.Config) error {
 		}
 	}
 
+	if fc.Okta.Enabled() {
+		if err := applyOktaConfig(fc, cfg); err != nil {
+			return trace.Wrap(err)
+		}
+	}
+
 	return nil
 }
 
@@ -516,6 +523,10 @@ func applyAuthOrProxyAddress(fc *FileConfig, cfg *service.Config) error {
 		}
 
 		if haveProxyServer {
+			if fc.Proxy.Enabled() {
+				return trace.BadParameter("proxy_server can not be specified when proxy service is enabled")
+			}
+
 			addr, err := utils.ParseHostPortAddr(fc.ProxyServer, defaults.HTTPListenPort)
 			if err != nil {
 				return trace.Wrap(err)
@@ -729,6 +740,14 @@ func applyAuthConfig(fc *FileConfig, cfg *service.Config) error {
 	}
 
 	cfg.Auth.LoadAllCAs = fc.Auth.LoadAllCAs
+
+	if fc.Auth.HostedPlugins.Enabled {
+		cfg.Auth.HostedPlugins.Enabled = true
+		cfg.Auth.HostedPlugins.OAuthProviders, err = fc.Auth.HostedPlugins.OAuthProviders.Parse()
+		if err != nil {
+			return trace.Wrap(err)
+		}
+	}
 
 	return nil
 }
@@ -1033,10 +1052,7 @@ func applyProxyConfig(fc *FileConfig, cfg *service.Config) error {
 		cfg.Proxy.PeerPublicAddr = *addr
 	}
 
-	if fc.Proxy.IdP.SAMLIdP.Enabled() {
-		cfg.Proxy.IdP.SAMLIdP.Enabled = true
-	}
-
+	cfg.Proxy.IdP.SAMLIdP.Enabled = fc.Proxy.IdP.SAMLIdP.Enabled()
 	cfg.Proxy.IdP.SAMLIdP.BaseURL = fc.Proxy.IdP.SAMLIdP.BaseURL
 
 	acme, err := fc.Proxy.ACME.Parse()
@@ -1193,6 +1209,7 @@ func getInstallerProxyAddr(matcher AzureMatcher, fc *FileConfig) string {
 
 func applyDiscoveryConfig(fc *FileConfig, cfg *service.Config) error {
 	cfg.Discovery.Enabled = fc.Discovery.Enabled()
+	cfg.Discovery.DiscoveryGroup = fc.Discovery.DiscoveryGroup
 	for _, matcher := range fc.Discovery.AWSMatchers {
 		installParams, err := matcher.InstallParams.Parse()
 		if err != nil {
@@ -2277,5 +2294,36 @@ func applyTokenConfig(fc *FileConfig, cfg *service.Config) error {
 		}
 	}
 
+	return nil
+}
+
+func applyOktaConfig(fc *FileConfig, cfg *service.Config) error {
+	if fc.Okta.APIEndpoint == "" {
+		return trace.BadParameter("okta_service is enabled but no api_endpoint is specified")
+	}
+	if fc.Okta.APITokenPath == "" {
+		return trace.BadParameter("okta_service is enabled but no api_token_path is specified")
+	}
+
+	// Make sure the URL is valid
+	url, err := url.Parse(fc.Okta.APIEndpoint)
+	if err != nil {
+		return trace.NewAggregate(trace.BadParameter("malformed URL %s", fc.Okta.APIEndpoint), err)
+	}
+
+	if url.Host == "" {
+		return trace.BadParameter("api_endpoint has no host")
+	} else if url.Scheme == "" {
+		return trace.BadParameter("api_endpoint has no scheme")
+	}
+
+	// Make sure the API token exists.
+	if _, err := utils.StatFile(fc.Okta.APITokenPath); err != nil {
+		return trace.NewAggregate(trace.BadParameter("error trying to find file %s", fc.Okta.APITokenPath), err)
+	}
+
+	cfg.Okta.Enabled = fc.Okta.Enabled()
+	cfg.Okta.APIEndpoint = fc.Okta.APIEndpoint
+	cfg.Okta.APITokenPath = fc.Okta.APITokenPath
 	return nil
 }

@@ -25,12 +25,15 @@ import (
 	"time"
 
 	"github.com/gravitational/trace"
+	"github.com/sirupsen/logrus"
 	"github.com/vulcand/predicate/builder"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/api/utils"
+	"github.com/gravitational/teleport/api/utils/keys"
 	dtauthz "github.com/gravitational/teleport/lib/devicetrust/authz"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/tlsca"
@@ -82,6 +85,17 @@ func NewAuthorizer(opts AuthorizerOpts) (Authorizer, error) {
 type Authorizer interface {
 	// Authorize authorizes user based on identity supplied via context
 	Authorize(ctx context.Context) (*Context, error)
+}
+
+// The AuthorizerFunc type is an adapter to allow the use of
+// ordinary functions as an Authorizer. If f is a function
+// with the appropriate signature, AuthorizerFunc(f) is a
+// Authorizer that calls f.
+type AuthorizerFunc func(ctx context.Context) (*Context, error)
+
+// Authorize calls f(ctx).
+func (f AuthorizerFunc) Authorize(ctx context.Context) (*Context, error) {
+	return f(ctx)
 }
 
 // AuthorizerAccessPoint is the access point contract required by an Authorizer
@@ -353,7 +367,12 @@ func (a *authorizer) authorizeRemoteUser(ctx context.Context, u RemoteUser) (*Co
 		RouteToDatabase:   u.Identity.RouteToDatabase,
 		MFAVerified:       u.Identity.MFAVerified,
 		LoginIP:           u.Identity.LoginIP,
+		PinnedIP:          u.Identity.PinnedIP,
 		PrivateKeyPolicy:  u.Identity.PrivateKeyPolicy,
+		UserType:          u.Identity.UserType,
+	}
+	if checker.PinSourceIP() && identity.PinnedIP == "" {
+		return nil, trace.AccessDenied("pinned IP is required for the user, but is not present on identity")
 	}
 
 	return &Context{
@@ -504,6 +523,7 @@ func roleSpecForProxy(clusterName string) types.RoleSpecV6 {
 				types.NewRule(types.KindDatabaseService, services.RO()),
 				types.NewRule(types.KindSAMLIdPServiceProvider, services.RO()),
 				types.NewRule(types.KindUserGroup, services.RO()),
+				types.NewRule(types.KindIntegration, services.RO()),
 				// this rule allows local proxy to update the remote cluster's host certificate authorities
 				// during certificates renewal
 				{
@@ -698,6 +718,7 @@ func definitionForBuiltinRole(clusterName string, recConfig types.SessionRecordi
 					Logins:                []string{},
 					NodeLabels:            types.Labels{types.Wildcard: []string{types.Wildcard}},
 					AppLabels:             types.Labels{types.Wildcard: []string{types.Wildcard}},
+					GroupLabels:           types.Labels{types.Wildcard: []string{types.Wildcard}},
 					KubernetesLabels:      types.Labels{types.Wildcard: []string{types.Wildcard}},
 					DatabaseLabels:        types.Labels{types.Wildcard: []string{types.Wildcard}},
 					DatabaseServiceLabels: types.Labels{types.Wildcard: []string{types.Wildcard}},
@@ -739,7 +760,7 @@ func definitionForBuiltinRole(clusterName string, recConfig types.SessionRecordi
 						types.NewRule(types.KindRole, services.RO()),
 						types.NewRule(types.KindNamespace, services.RO()),
 						types.NewRule(types.KindLock, services.RO()),
-						types.NewRule(types.KindKubernetesCluster, services.RW()),
+						types.NewRule(types.KindKubernetesCluster, services.RO()),
 						types.NewRule(types.KindSemaphore, services.RW()),
 					},
 				},
@@ -786,6 +807,32 @@ func definitionForBuiltinRole(clusterName string, recConfig types.SessionRecordi
 					// wildcard any cluster available.
 					KubernetesLabels: types.Labels{types.Wildcard: []string{types.Wildcard}},
 					DatabaseLabels:   types.Labels{types.Wildcard: []string{types.Wildcard}},
+				},
+			})
+	case types.RoleOkta:
+		return services.RoleFromSpec(
+			role.String(),
+			types.RoleSpecV6{
+				Allow: types.RoleConditions{
+					Namespaces:  []string{types.Wildcard},
+					AppLabels:   types.Labels{types.Wildcard: []string{types.Wildcard}},
+					GroupLabels: types.Labels{types.Wildcard: []string{types.Wildcard}},
+					Rules: []types.Rule{
+						types.NewRule(types.KindClusterName, services.RO()),
+						types.NewRule(types.KindCertAuthority, services.ReadNoSecrets()),
+						types.NewRule(types.KindSemaphore, services.RW()),
+						types.NewRule(types.KindEvent, services.RW()),
+						types.NewRule(types.KindAppServer, services.RW()),
+						types.NewRule(types.KindClusterNetworkingConfig, services.RO()),
+						types.NewRule(types.KindUser, services.RO()),
+						types.NewRule(types.KindUserGroup, services.RW()),
+						types.NewRule(types.KindOktaImportRule, services.RO()),
+						types.NewRule(types.KindOktaAssignment, services.RW()),
+						types.NewRule(types.KindProxy, services.RO()),
+						types.NewRule(types.KindClusterAuthPreference, services.RO()),
+						types.NewRule(types.KindRole, services.RO()),
+						types.NewRule(types.KindLock, services.RO()),
+					},
 				},
 			})
 	}
@@ -902,19 +949,40 @@ func ClientUsername(ctx context.Context) string {
 	return identity.Username
 }
 
+func userIdentityFromContext(ctx context.Context) (*tlsca.Identity, error) {
+	userWithIdentity, err := UserFromContext(ctx)
+	if err != nil {
+		return nil, trace.AccessDenied("missing identity")
+	}
+
+	identity := userWithIdentity.GetIdentity()
+	if identity.Username == "" {
+		return nil, trace.AccessDenied("missing identity username")
+	}
+
+	return &identity, nil
+}
+
 // GetClientUsername returns the username of a remote HTTP client making the call.
 // If ctx didn't pass through auth middleware or did not come from an HTTP
 // request, returns an error.
 func GetClientUsername(ctx context.Context) (string, error) {
-	userWithIdentity, err := UserFromContext(ctx)
+	identity, err := userIdentityFromContext(ctx)
 	if err != nil {
-		return "", trace.AccessDenied("missing identity")
-	}
-	identity := userWithIdentity.GetIdentity()
-	if identity.Username == "" {
-		return "", trace.AccessDenied("missing identity username")
+		return "", trace.Wrap(err)
 	}
 	return identity.Username, nil
+}
+
+// GetClientUserIsSSO extracts the identity of a remote HTTP client and indicates whether that is an SSO user.
+// If ctx didn't pass through auth middleware or did not come from an HTTP
+// request, returns an error.
+func GetClientUserIsSSO(ctx context.Context) (bool, error) {
+	identity, err := userIdentityFromContext(ctx)
+	if err != nil {
+		return false, trace.Wrap(err)
+	}
+	return identity.UserType == types.UserTypeSSO, nil
 }
 
 // ClientImpersonator returns the impersonator username of a remote client
@@ -953,6 +1021,75 @@ func ClientUserMetadataWithUser(ctx context.Context, user string) apievents.User
 	meta := ClientUserMetadata(ctx)
 	meta.User = user
 	return meta
+}
+
+// ConvertAuthorizerError will take an authorizer error and convert it into an error easily
+// handled by gRPC services.
+func ConvertAuthorizerError(ctx context.Context, log logrus.FieldLogger, err error) error {
+	switch {
+	case err == nil:
+		return nil
+	// propagate connection problem error so we can differentiate
+	// between connection failed and access denied
+	case trace.IsConnectionProblem(err):
+		return trace.ConnectionProblem(err, "failed to connect to the database")
+	case trace.IsNotFound(err):
+		// user not found, wrap error with access denied
+		return trace.Wrap(err, "access denied")
+	case trace.IsAccessDenied(err):
+		// don't print stack trace, just log the warning
+		log.Warn(err)
+	case keys.IsPrivateKeyPolicyError(err):
+		// private key policy errors should be returned to the client
+		// unaltered so that they know to reauthenticate with a valid key.
+		return trace.Unwrap(err)
+	default:
+		log.Warn(trace.DebugReport(err))
+	}
+	return trace.AccessDenied("access denied")
+}
+
+// AuthorizeResourceWithVerbs will ensure that the user has access to the given verbs for the given kind.
+func AuthorizeResourceWithVerbs(ctx context.Context, log logrus.FieldLogger, authorizer Authorizer, quiet bool, resource types.Resource, verbs ...string) (*Context, error) {
+	authCtx, err := authorizer.Authorize(ctx)
+	if err != nil {
+		return nil, ConvertAuthorizerError(ctx, log, err)
+	}
+
+	ruleCtx := &services.Context{
+		User:     authCtx.User,
+		Resource: resource,
+	}
+
+	return authorizeContextWithVerbs(ctx, log, authCtx, quiet, ruleCtx, resource.GetKind(), verbs...)
+}
+
+// AuthorizeWithVerbs will ensure that the user has access to the given verbs for the given kind.
+func AuthorizeWithVerbs(ctx context.Context, log logrus.FieldLogger, authorizer Authorizer, quiet bool, kind string, verbs ...string) (*Context, error) {
+	authCtx, err := authorizer.Authorize(ctx)
+	if err != nil {
+		return nil, ConvertAuthorizerError(ctx, log, err)
+	}
+
+	ruleCtx := &services.Context{
+		User: authCtx.User,
+	}
+
+	return authorizeContextWithVerbs(ctx, log, authCtx, quiet, ruleCtx, kind, verbs...)
+}
+
+// authorizeContextWithVerbs will ensure that the user has access to the given verbs for the given services.context.
+func authorizeContextWithVerbs(ctx context.Context, log logrus.FieldLogger, authCtx *Context, quiet bool, ruleCtx *services.Context, kind string, verbs ...string) (*Context, error) {
+	errs := make([]error, len(verbs))
+	for i, verb := range verbs {
+		errs[i] = authCtx.Checker.CheckAccessToRule(ruleCtx, defaults.Namespace, kind, verb, quiet)
+	}
+
+	// Convert generic aggregate error to AccessDenied (auth_with_roles also does this).
+	if err := trace.NewAggregate(errs...); err != nil {
+		return nil, trace.AccessDenied(err.Error())
+	}
+	return authCtx, nil
 }
 
 // LocalUser is a local user

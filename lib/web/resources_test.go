@@ -159,6 +159,7 @@ func TestNewResourceItemGithub(t *testing.T) {
 metadata:
   name: githubName
 spec:
+  api_endpoint_url: ""
   client_id: ""
   client_secret: ""
   display: ""
@@ -216,6 +217,7 @@ spec:
   deny: {}
   options:
     cert_format: standard
+    create_desktop_user: false
     create_host_user: false
     desktop_clipboard: true
     desktop_directory_sharing: true

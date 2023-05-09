@@ -271,22 +271,6 @@ func (s *PresenceService) UpsertNode(ctx context.Context, server types.Server) (
 	}, nil
 }
 
-// DELETE IN: 5.1.0.
-//
-// This logic has been moved to KeepAliveServer.
-//
-// KeepAliveNode updates node expiry
-func (s *PresenceService) KeepAliveNode(ctx context.Context, h types.KeepAlive) error {
-	if err := h.CheckAndSetDefaults(); err != nil {
-		return trace.Wrap(err)
-	}
-	err := s.KeepAlive(ctx, backend.Lease{
-		ID:  h.LeaseID,
-		Key: backend.Key(nodesPrefix, h.Namespace, h.Name),
-	}, h.Expires)
-	return trace.Wrap(err)
-}
-
 // GetAuthServers returns a list of registered servers
 func (s *PresenceService) GetAuthServers() ([]types.Server, error) {
 	return s.getServers(context.TODO(), types.KindAuthServer, authServersPrefix)
@@ -1485,6 +1469,28 @@ func (s *PresenceService) GetHostUserInteractionTime(ctx context.Context, name s
 	return t, nil
 }
 
+// GetUserGroups returns all registered user groups.
+func (s *PresenceService) GetUserGroups(ctx context.Context, opts ...services.MarshalOption) ([]types.UserGroup, error) {
+	startKey := backend.Key(userGroupPrefix)
+	result, err := s.GetRange(ctx, startKey, backend.RangeEnd(startKey), backend.NoLimit)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	userGroups := make([]types.UserGroup, len(result.Items))
+	for i, item := range result.Items {
+		server, err := services.UnmarshalUserGroup(
+			item.Value,
+			services.AddOptions(opts,
+				services.WithResourceID(item.ID),
+				services.WithExpires(item.Expires))...)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		userGroups[i] = server
+	}
+	return userGroups, nil
+}
+
 // ListResources returns a paginated list of resources.
 // It implements various filtering for scenarios where the call comes directly
 // here (without passing through the RBAC).
@@ -1527,6 +1533,9 @@ func (s *PresenceService) listResources(ctx context.Context, req proto.ListResou
 	case types.KindKubeServer:
 		keyPrefix = []string{kubeServersPrefix}
 		unmarshalItemFunc = backendItemToKubernetesServer
+	case types.KindUserGroup:
+		keyPrefix = []string{userGroupPrefix}
+		unmarshalItemFunc = backendItemToUserGroup
 	default:
 		return nil, trace.NotImplemented("%s not implemented at ListResources", req.ResourceType)
 	}
@@ -1655,6 +1664,17 @@ func (s *PresenceService) listResourcesWithSort(ctx context.Context, req proto.L
 			return nil, trace.Wrap(err)
 		}
 		resources = kubeServers.AsResources()
+	case types.KindUserGroup:
+		userGroups, err := s.GetUserGroups(ctx)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+
+		sortedUserGroups := types.UserGroups(userGroups)
+		if err := sortedUserGroups.SortByCustom(req.SortBy); err != nil {
+			return nil, trace.Wrap(err)
+		}
+		resources = sortedUserGroups.AsResources()
 
 	default:
 		return nil, trace.NotImplemented("resource type %q is not supported for ListResourcesWithSort", req.ResourceType)
@@ -1778,6 +1798,16 @@ func backendItemToServer(kind string) backendItemToResourceFunc {
 // `types.WindowsDesktopService`, returning it as a `types.ResourceWithLabels`.
 func backendItemToWindowsDesktopService(item backend.Item) (types.ResourceWithLabels, error) {
 	return services.UnmarshalWindowsDesktopService(
+		item.Value,
+		services.WithResourceID(item.ID),
+		services.WithExpires(item.Expires),
+	)
+}
+
+// backendItemToUserGroup unmarshals `backend.Item` into a
+// `types.UserGroup`, returning it as a `types.ResourceWithLabels`.
+func backendItemToUserGroup(item backend.Item) (types.ResourceWithLabels, error) {
+	return services.UnmarshalUserGroup(
 		item.Value,
 		services.WithResourceID(item.ID),
 		services.WithExpires(item.Expires),

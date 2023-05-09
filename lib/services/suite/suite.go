@@ -117,7 +117,7 @@ func NewTestCAWithConfig(config TestCAConfig) *types.CertAuthorityV2 {
 	switch config.Type {
 	case types.DatabaseCA:
 		ca.Spec.ActiveKeys.TLS = []*types.TLSKeyPair{{Cert: cert, Key: keyBytes}}
-	case types.KindJWT:
+	case types.KindJWT, types.OIDCIdPCA:
 		// Generating keys is CPU intensive operation. Generate JWT keys only
 		// when needed.
 		publicKey, privateKey, err := testauthority.New().GenerateJWT()
@@ -362,8 +362,7 @@ func NewServer(kind, name, addr, namespace string) *types.ServerV2 {
 			Namespace: namespace,
 		},
 		Spec: types.ServerSpecV2{
-			Addr:       addr,
-			PublicAddr: addr,
+			Addr: addr,
 		},
 	}
 }
@@ -914,7 +913,7 @@ func (s *ServicesTestSuite) GithubConnectorCRUD(t *testing.T) {
 			ClientID:     "aaa",
 			ClientSecret: "bbb",
 			RedirectURL:  "https://localhost:3080/v1/webapi/github/callback",
-			Display:      "Github",
+			Display:      "GitHub",
 			TeamsToLogins: []types.TeamMapping{
 				{
 					Organization: "gravitational",

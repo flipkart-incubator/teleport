@@ -34,7 +34,6 @@ import (
 	"math"
 	"math/big"
 	insecurerand "math/rand"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -74,6 +73,7 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/githubactions"
+	"github.com/gravitational/teleport/lib/gitlab"
 	"github.com/gravitational/teleport/lib/inventory"
 	kubeutils "github.com/gravitational/teleport/lib/kube/utils"
 	"github.com/gravitational/teleport/lib/kubernetestoken"
@@ -189,7 +189,10 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 		}
 	}
 	if cfg.UserGroups == nil {
-		cfg.UserGroups = local.NewUserGroupService(cfg.Backend)
+		cfg.UserGroups, err = local.NewUserGroupService(cfg.Backend)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
 	}
 	if cfg.ConnectionsDiagnostic == nil {
 		cfg.ConnectionsDiagnostic = local.NewConnectionsDiagnosticService(cfg.Backend)
@@ -200,9 +203,6 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 			return nil, trace.Wrap(err)
 		}
 	}
-	if cfg.Enforcer == nil {
-		cfg.Enforcer = local.NewNoopEnforcer()
-	}
 	if cfg.AssertionReplayService == nil {
 		cfg.AssertionReplayService = local.NewAssertionReplayService(cfg.Backend)
 	}
@@ -211,6 +211,18 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 	}
 	if cfg.UsageReporter == nil {
 		cfg.UsageReporter = usagereporter.DiscardUsageReporter{}
+	}
+	if cfg.Okta == nil {
+		cfg.Okta, err = local.NewOktaService(cfg.Backend, cfg.Backend.Clock())
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+	}
+	if cfg.Integrations == nil {
+		cfg.Integrations, err = local.NewIntegrationsService(cfg.Backend)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
 	}
 
 	limiter, err := limiter.NewConnectionsLimiter(limiter.Config{
@@ -259,8 +271,9 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 		SAMLIdPServiceProviders: cfg.SAMLIdPServiceProviders,
 		UserGroups:              cfg.UserGroups,
 		SessionTrackerService:   cfg.SessionTrackerService,
-		Enforcer:                cfg.Enforcer,
 		ConnectionsDiagnostic:   cfg.ConnectionsDiagnostic,
+		Integrations:            cfg.Integrations,
+		Okta:                    cfg.Okta,
 		StatusInternal:          cfg.Status,
 		UsageReporter:           cfg.UsageReporter,
 	}
@@ -281,11 +294,11 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 		Services:        services,
 		Cache:           services,
 		keyStore:        keyStore,
-		inventory:       inventory.NewController(cfg.Presence, services, inventory.WithAuthServerID(cfg.HostUUID)),
 		traceClient:     cfg.TraceClient,
 		fips:            cfg.FIPS,
 		loadAllCAs:      cfg.LoadAllCAs,
 	}
+	as.inventory = inventory.NewController(&as, services, inventory.WithAuthServerID(cfg.HostUUID))
 	for _, o := range opts {
 		if err := o(&as); err != nil {
 			return nil, trace.Wrap(err)
@@ -306,6 +319,17 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 				Clock: as.clock,
 			},
 		)
+	}
+	if as.gitlabIDTokenValidator == nil {
+		as.gitlabIDTokenValidator, err = gitlab.NewIDTokenValidator(
+			gitlab.IDTokenValidatorConfig{
+				Clock:             as.clock,
+				ClusterNameGetter: services,
+			},
+		)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
 	}
 	if as.circleCITokenValidate == nil {
 		as.circleCITokenValidate = func(
@@ -340,9 +364,10 @@ type Services struct {
 	services.SAMLIdPServiceProviders
 	services.UserGroups
 	services.SessionTrackerService
-	services.Enforcer
 	services.ConnectionsDiagnostic
 	services.StatusInternal
+	services.Integrations
+	services.Okta
 	usagereporter.UsageReporter
 	types.Events
 	events.IAuditLog
@@ -358,6 +383,11 @@ func (r *Services) GetWebSession(ctx context.Context, req types.GetWebSessionReq
 // Implements ReadAccessPoint
 func (r *Services) GetWebToken(ctx context.Context, req types.GetWebTokenRequest) (types.WebToken, error) {
 	return r.Identity.WebTokens().Get(ctx, req)
+}
+
+// OktaClient returns the okta client.
+func (r *Services) OktaClient() services.Okta {
+	return r
 }
 
 var (
@@ -427,6 +457,11 @@ var (
 		registeredAgents, migrations,
 	}
 )
+
+// LoginHook is a function that will be called on a successful login. This will likely be used
+// for enterprise services that need to add in feature specific operations after a user has been
+// successfully authenticated. An example would be creating objects based on the user.
+type LoginHook func(context.Context, types.User) error
 
 // Server keeps the cluster together. It acts as a certificate authority (CA) for
 // a cluster and:
@@ -517,6 +552,10 @@ type Server struct {
 	// by the auth server. It can be overridden for the purpose of tests.
 	ghaIDTokenValidator ghaIDTokenValidator
 
+	// gitlabIDTokenValidator allows ID tokens from GitLab CI to be validated by
+	// the auth server. It can be overridden for the purpose of tests.
+	gitlabIDTokenValidator gitlabIDTokenValidator
+
 	// circleCITokenValidate allows ID tokens from CircleCI to be validated by
 	// the auth server. It can be overridden for the purpose of tests.
 	circleCITokenValidate func(ctx context.Context, organizationID, token string) (*circleci.IDTokenClaims, error)
@@ -530,6 +569,14 @@ type Server struct {
 
 	// license is the Teleport Enterprise license used to start the auth server
 	license *liblicense.License
+
+	// headlessAuthenticationWatcher is a headless authentication watcher,
+	// used to catch and propagate headless authentication request changes.
+	headlessAuthenticationWatcher *local.HeadlessAuthenticationWatcher
+
+	loginHooksMu sync.RWMutex
+	// loginHooks are a list of hooks that will be called on login.
+	loginHooks []LoginHook
 }
 
 // SetSAMLService registers svc as the SAMLService that provides the SAML
@@ -571,6 +618,41 @@ func (a *Server) GetLoginRuleEvaluator() loginrule.Evaluator {
 	return a.loginRuleEvaluator
 }
 
+// RegisterLoginHook will register a login hook with the auth server.
+func (a *Server) RegisterLoginHook(hook LoginHook) {
+	a.loginHooksMu.Lock()
+	defer a.loginHooksMu.Unlock()
+
+	a.loginHooks = append(a.loginHooks, hook)
+}
+
+// CallLoginHooks will call the registered login hooks.
+func (a *Server) CallLoginHooks(ctx context.Context, user types.User) error {
+	// Make a copy of the login hooks to operate on.
+	a.loginHooksMu.RLock()
+	loginHooks := make([]LoginHook, len(a.loginHooks))
+	copy(loginHooks, a.loginHooks)
+	a.loginHooksMu.RUnlock()
+
+	if len(loginHooks) == 0 {
+		return nil
+	}
+
+	var errs []error
+	for _, hook := range loginHooks {
+		errs = append(errs, hook(ctx, user))
+	}
+
+	return trace.NewAggregate(errs...)
+}
+
+// ResetLoginHooks will clear out the login hooks.
+func (a *Server) ResetLoginHooks() {
+	a.loginHooksMu.Lock()
+	a.loginHooks = nil
+	a.loginHooksMu.Unlock()
+}
+
 // CloseContext returns the close context
 func (a *Server) CloseContext() context.Context {
 	return a.closeCtx
@@ -590,6 +672,12 @@ func (a *Server) checkLockInForce(mode constants.LockingMode, targets []types.Lo
 		return trace.BadParameter("lockWatcher is not set")
 	}
 	return a.lockWatcher.CheckLockInForce(mode, targets...)
+}
+
+func (a *Server) SetHeadlessAuthenticationWatcher(headlessAuthenticationWatcher *local.HeadlessAuthenticationWatcher) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+	a.headlessAuthenticationWatcher = headlessAuthenticationWatcher
 }
 
 // runPeriodicOperations runs some periodic bookkeeping operations
@@ -838,7 +926,7 @@ func (a *Server) doReleaseAlertSync(ctx context.Context, current vc.Target, visi
 		}
 	}
 
-	if sp := visitor.NewestSecurityPatch(); sp.Ok() && sp.NewerThan(current) {
+	if sp := visitor.NewestSecurityPatch(); sp.Ok() && sp.NewerThan(current) && !sp.SecurityPatchAltOf(current) {
 		// explicit security patch alerts have a more limited audience, so we generate
 		// them as their own separate alert.
 		log.Warnf("A newer security patch has been detected. current=%s, patch=%s", current.Version(), sp.Version())
@@ -1018,9 +1106,11 @@ func (a *Server) SetEmitter(emitter apievents.Emitter) {
 	a.emitter = emitter
 }
 
-// SetEnforcer sets the server's enforce service
-func (a *Server) SetEnforcer(enforcer services.Enforcer) {
-	a.Services.Enforcer = enforcer
+// EmitAuditEvent implements [apievents.Emitter] by delegating to its dedicated
+// emitter rather than falling back to the implementation from [Services] (using
+// the audit log directly, which is almost never what you want).
+func (a *Server) EmitAuditEvent(ctx context.Context, e apievents.AuditEvent) error {
+	return trace.Wrap(a.emitter.EmitAuditEvent(ctx, e))
 }
 
 // SetUsageReporter sets the server's usage reporter. Note that this is only
@@ -1256,9 +1346,20 @@ func certRequestDeviceExtensions(ext tlsca.DeviceExtensions) certRequestOption {
 	}
 }
 
+// GenerateUserTestCertsRequest is a request to generate test certificates.
+type GenerateUserTestCertsRequest struct {
+	Key            []byte
+	Username       string
+	TTL            time.Duration
+	Compatibility  string
+	RouteToCluster string
+	PinnedIP       string
+	MFAVerified    string
+}
+
 // GenerateUserTestCerts is used to generate user certificate, used internally for tests
-func (a *Server) GenerateUserTestCerts(key []byte, username string, ttl time.Duration, compatibility, routeToCluster, pinnedIP string) ([]byte, []byte, error) {
-	user, err := a.GetUser(username, false)
+func (a *Server) GenerateUserTestCerts(req GenerateUserTestCertsRequest) ([]byte, []byte, error) {
+	user, err := a.GetUser(req.Username, false)
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
 	}
@@ -1273,14 +1374,15 @@ func (a *Server) GenerateUserTestCerts(key []byte, username string, ttl time.Dur
 	}
 	certs, err := a.generateUserCert(certRequest{
 		user:           user,
-		ttl:            ttl,
-		compatibility:  compatibility,
-		publicKey:      key,
-		routeToCluster: routeToCluster,
+		ttl:            req.TTL,
+		compatibility:  req.Compatibility,
+		publicKey:      req.Key,
+		routeToCluster: req.RouteToCluster,
 		checker:        checker,
 		traits:         user.GetTraits(),
-		loginIP:        pinnedIP,
-		pinIP:          pinnedIP != "",
+		loginIP:        req.PinnedIP,
+		pinIP:          req.PinnedIP != "",
+		mfaVerified:    req.MFAVerified,
 	})
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
@@ -1368,6 +1470,8 @@ type DatabaseTestCertRequest struct {
 	Username string
 	// RouteToDatabase contains database routing information.
 	RouteToDatabase tlsca.RouteToDatabase
+	// PinnedIP is an IP new certificate should be pinned to.
+	PinnedIP string
 }
 
 // GenerateDatabaseTestCert generates a database access certificate for the
@@ -1389,6 +1493,8 @@ func (a *Server) GenerateDatabaseTestCert(req DatabaseTestCertRequest) ([]byte, 
 	certs, err := a.generateUserCert(certRequest{
 		user:      user,
 		publicKey: req.PublicKey,
+		loginIP:   req.PinnedIP,
+		pinIP:     req.PinnedIP != "",
 		checker:   checker,
 		ttl:       time.Hour,
 		traits: map[string][]string{
@@ -1686,7 +1792,7 @@ func (a *Server) submitCertificateIssuedEvent(req *certRequest) {
 		user = req.impersonator
 	}
 
-	if err := a.AnonymizeAndSubmit(&usagereporter.UserCertificateIssuedEvent{
+	a.AnonymizeAndSubmit(&usagereporter.UserCertificateIssuedEvent{
 		UserName:        user,
 		Ttl:             durationpb.New(req.ttl),
 		IsBot:           bot,
@@ -1694,9 +1800,7 @@ func (a *Server) submitCertificateIssuedEvent(req *certRequest) {
 		UsageApp:        app,
 		UsageKubernetes: kubernetes,
 		UsageDesktop:    desktop,
-	}); err != nil {
-		log.Debugf("Unable to submit certificate issued usage event: %v", err)
-	}
+	})
 }
 
 // generateUserCert generates user certificates
@@ -1956,6 +2060,7 @@ func (a *Server) generateUserCert(req certRequest) (*proto.Certs, error) {
 			AssetTag:     req.deviceExtensions.AssetTag,
 			CredentialID: req.deviceExtensions.CredentialID,
 		},
+		UserType: req.user.GetUserType(),
 	}
 	subject, err := identity.Subject()
 	if err != nil {
@@ -3632,6 +3737,154 @@ func (a *Server) NewKeepAliver(ctx context.Context) (types.KeepAliver, error) {
 	return k, nil
 }
 
+// KeepAliveServer implements [services.Presence] by delegating to
+// [Server.Services] and potentially emitting a [usagereporter] event.
+func (a *Server) KeepAliveServer(ctx context.Context, h types.KeepAlive) error {
+	if err := a.Services.KeepAliveServer(ctx, h); err != nil {
+		return trace.Wrap(err)
+	}
+
+	// ResourceHeartbeatEvent only cares about a few KeepAlive types
+	kind := usagereporter.ResourceKindFromKeepAliveType(h.Type)
+	if kind == 0 {
+		return nil
+	}
+
+	// KubeServiceV2 (used by v11 kube agents) keepalives as
+	// KeepAlive_KUBERNETES but with no HostID; we shouldn't count those, as the
+	// name is going to be the host ID of the agent rather than the kube cluster
+	// name.
+	// DELETE IN: 13.0
+	if h.Type == types.KeepAlive_KUBERNETES && h.HostID == "" {
+		return nil
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   h.Name,
+		Kind:   kind,
+		Static: h.Expires.IsZero(),
+	})
+
+	return nil
+}
+
+// UpsertNode implements [services.Presence] by delegating to [Server.Services]
+// and potentially emitting a [usagereporter] event.
+func (a *Server) UpsertNode(ctx context.Context, server types.Server) (*types.KeepAlive, error) {
+	lease, err := a.Services.UpsertNode(ctx, server)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   server.GetName(),
+		Kind:   usagereporter.ResourceKindNode,
+		Static: server.Expiry().IsZero(),
+	})
+
+	return lease, nil
+}
+
+// UpsertKubernetesServer implements [services.Presence] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) UpsertKubernetesServer(ctx context.Context, server types.KubeServer) (*types.KeepAlive, error) {
+	k, err := a.Services.UpsertKubernetesServer(ctx, server)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		// the name of types.KubeServer might include a -proxy_service suffix
+		Name:   server.GetCluster().GetName(),
+		Kind:   usagereporter.ResourceKindKubeServer,
+		Static: server.Expiry().IsZero(),
+	})
+
+	return k, nil
+}
+
+// UpsertApplicationServer implements [services.Presence] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) UpsertApplicationServer(ctx context.Context, server types.AppServer) (*types.KeepAlive, error) {
+	lease, err := a.Services.UpsertApplicationServer(ctx, server)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   server.GetName(),
+		Kind:   usagereporter.ResourceKindAppServer,
+		Static: server.Expiry().IsZero(),
+	})
+
+	return lease, nil
+}
+
+// UpsertDatabaseServer implements [services.Presence] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) UpsertDatabaseServer(ctx context.Context, server types.DatabaseServer) (*types.KeepAlive, error) {
+	lease, err := a.Services.UpsertDatabaseServer(ctx, server)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   server.GetName(),
+		Kind:   usagereporter.ResourceKindDBServer,
+		Static: server.Expiry().IsZero(),
+	})
+
+	return lease, nil
+}
+
+// CreateWindowsDesktop implements [services.WindowsDesktops] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) CreateWindowsDesktop(ctx context.Context, desktop types.WindowsDesktop) error {
+	if err := a.Services.CreateWindowsDesktop(ctx, desktop); err != nil {
+		return trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   desktop.GetName(),
+		Kind:   usagereporter.ResourceKindWindowsDesktop,
+		Static: desktop.Expiry().IsZero(),
+	})
+
+	return nil
+}
+
+// UpdateWindowsDesktop implements [services.WindowsDesktops] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) UpdateWindowsDesktop(ctx context.Context, desktop types.WindowsDesktop) error {
+	if err := a.Services.UpdateWindowsDesktop(ctx, desktop); err != nil {
+		return trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   desktop.GetName(),
+		Kind:   usagereporter.ResourceKindWindowsDesktop,
+		Static: desktop.Expiry().IsZero(),
+	})
+
+	return nil
+}
+
+// UpsertWindowsDesktop implements [services.WindowsDesktops] by delegating to
+// [Server.Services] and then potentially emitting a [usagereporter] event.
+func (a *Server) UpsertWindowsDesktop(ctx context.Context, desktop types.WindowsDesktop) error {
+	if err := a.Services.UpsertWindowsDesktop(ctx, desktop); err != nil {
+		return trace.Wrap(err)
+	}
+
+	a.AnonymizeAndSubmit(&usagereporter.ResourceHeartbeatEvent{
+		Name:   desktop.GetName(),
+		Kind:   usagereporter.ResourceKindWindowsDesktop,
+		Static: desktop.Expiry().IsZero(),
+	})
+
+	return nil
+}
+
 // GenerateCertAuthorityCRL generates an empty CRL for the local CA of a given type.
 func (a *Server) GenerateCertAuthorityCRL(ctx context.Context, caType types.CertAuthType) ([]byte, error) {
 	// Generate a CRL for the current cluster CA.
@@ -4030,16 +4283,43 @@ func (a *Server) SubmitUsageEvent(ctx context.Context, req *proto.SubmitUsageEve
 		return trace.Wrap(err)
 	}
 
-	event, err := usagereporter.ConvertUsageEvent(req.GetEvent(), username)
+	userIsSSO, err := authz.GetClientUserIsSSO(ctx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	if err := a.AnonymizeAndSubmit(event); err != nil {
+	userMetadata := usagereporter.UserMetadata{
+		Username: username,
+		IsSSO:    userIsSSO,
+	}
+
+	event, err := usagereporter.ConvertUsageEvent(req.GetEvent(), userMetadata)
+	if err != nil {
 		return trace.Wrap(err)
 	}
 
+	a.AnonymizeAndSubmit(event)
+
 	return nil
+}
+
+// Ping gets basic info about the auth server.
+// Please note that Ping is publicly accessible (not protected by any RBAC) by design,
+// and thus PingResponse must never contain any sensitive information.
+func (a *Server) Ping(ctx context.Context) (proto.PingResponse, error) {
+	cn, err := a.GetClusterName()
+	if err != nil {
+		return proto.PingResponse{}, trace.Wrap(err)
+	}
+
+	return proto.PingResponse{
+		ClusterName:     cn.GetClusterName(),
+		ServerVersion:   teleport.Version,
+		ServerFeatures:  modules.GetModules().Features().ToProto(),
+		ProxyPublicAddr: a.getProxyPublicAddr(),
+		IsBoring:        modules.GetModules().IsBoringBinary(),
+		LoadAllCAs:      a.loadAllCAs,
+	}, nil
 }
 
 func (a *Server) isMFARequired(ctx context.Context, checker services.AccessChecker, req *proto.IsMFARequiredRequest) (*proto.IsMFARequiredResponse, error) {
@@ -4064,23 +4344,17 @@ func (a *Server) isMFARequired(ctx context.Context, checker services.AccessCheck
 		if t.Node.Login == "" {
 			return nil, trace.BadParameter("empty Login field")
 		}
+
 		// Find the target node and check whether MFA is required.
-		nodes, err := a.GetNodes(ctx, apidefaults.Namespace)
+		matches, err := client.GetResourcesWithFilters(ctx, a, proto.ListResourcesRequest{
+			ResourceType:   types.KindNode,
+			Namespace:      apidefaults.Namespace,
+			SearchKeywords: []string{t.Node.Node},
+		})
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-		var matches []types.Server
-		for _, n := range nodes {
-			// Get the server address without port number.
-			addr, _, err := net.SplitHostPort(n.GetAddr())
-			if err != nil {
-				addr = n.GetAddr()
-			}
-			// Match NodeName to UUID, hostname or self-reported server address.
-			if n.GetName() == t.Node.Node || n.GetHostname() == t.Node.Node || addr == t.Node.Node {
-				matches = append(matches, n)
-			}
-		}
+
 		if len(matches) == 0 {
 			// If t.Node.Node is not a known registered node, it may be an
 			// unregistered host running OpenSSH with a certificate created via
@@ -4096,7 +4370,18 @@ func (a *Server) isMFARequired(ctx context.Context, checker services.AccessCheck
 		// Check RBAC against all matching nodes and return the first error.
 		// If at least one node requires MFA, we'll catch it.
 		for _, n := range matches {
-			err := checker.CheckAccess(
+			srv, ok := n.(types.Server)
+			if !ok {
+				continue
+			}
+
+			// Filter out any matches on labels before checking access
+			fieldVals := append(srv.GetPublicAddrs(), srv.GetName(), srv.GetHostname(), srv.GetAddr())
+			if !types.MatchSearch(fieldVals, []string{t.Node.Node}, nil) {
+				continue
+			}
+
+			err = checker.CheckAccess(
 				n,
 				services.AccessState{},
 				services.NewLoginMatcher(t.Node.Login),
@@ -4472,7 +4757,7 @@ func newKeySet(ctx context.Context, keyStore *keystore.Manager, caID types.CertA
 			return keySet, trace.Wrap(err)
 		}
 		keySet.SSH = append(keySet.SSH, sshKeyPair)
-	case types.JWTSigner:
+	case types.JWTSigner, types.OIDCIdPCA:
 		jwtKeyPair, err := keyStore.NewJWTKeyPair(ctx)
 		if err != nil {
 			return keySet, trace.Wrap(err)
@@ -4551,7 +4836,7 @@ func (a *Server) deleteUnusedKeys(ctx context.Context) error {
 		return trace.Wrap(err)
 	}
 
-	var usedKeys [][]byte
+	var activeKeys [][]byte
 	for _, caType := range types.CertAuthTypes {
 		caID := types.CertAuthID{Type: caType, DomainName: clusterName.GetClusterName()}
 		ca, err := a.Services.GetCertAuthority(ctx, caID, true)
@@ -4560,17 +4845,23 @@ func (a *Server) deleteUnusedKeys(ctx context.Context) error {
 		}
 		for _, keySet := range []types.CAKeySet{ca.GetActiveKeys(), ca.GetAdditionalTrustedKeys()} {
 			for _, sshKeyPair := range keySet.SSH {
-				usedKeys = append(usedKeys, sshKeyPair.PrivateKey)
+				activeKeys = append(activeKeys, sshKeyPair.PrivateKey)
 			}
 			for _, tlsKeyPair := range keySet.TLS {
-				usedKeys = append(usedKeys, tlsKeyPair.Key)
+				activeKeys = append(activeKeys, tlsKeyPair.Key)
 			}
 			for _, jwtKeyPair := range keySet.JWT {
-				usedKeys = append(usedKeys, jwtKeyPair.PrivateKey)
+				activeKeys = append(activeKeys, jwtKeyPair.PrivateKey)
 			}
 		}
 	}
-	return trace.Wrap(a.keyStore.DeleteUnusedKeys(ctx, usedKeys))
+	if err := a.keyStore.DeleteUnusedKeys(ctx, activeKeys); err != nil {
+		// Key deletion is best-effort, log a warning if it fails and carry on.
+		// We don't want to prevent a CA rotation, which may be necessary in
+		// some cases where this would fail.
+		log.WithError(err).Warning("Failed attempt to delete unused HSM keys")
+	}
+	return nil
 }
 
 // GetLicense return the license used the start the teleport enterprise auth server
@@ -4582,6 +4873,59 @@ func (a *Server) GetLicense(ctx context.Context) (string, error) {
 		return "", trace.NotFound("license not found")
 	}
 	return fmt.Sprintf("%s%s", a.license.CertPEM, a.license.KeyPEM), nil
+}
+
+// GetHeadlessAuthentication returns a headless authentication from the backend by name.
+// If it does not yet exist, a stub will be created to signal the login process to upsert
+// login details. This method will wait for the updated headless authentication and return it.
+func (a *Server) GetHeadlessAuthentication(ctx context.Context, name string) (*types.HeadlessAuthentication, error) {
+	// Try to create a stub if it doesn't already exist, then wait for full login details.
+	if _, err := a.Services.CreateHeadlessAuthenticationStub(ctx, name); err != nil && !trace.IsAlreadyExists(err) {
+		return nil, trace.Wrap(err)
+	}
+
+	sub, err := a.headlessAuthenticationWatcher.Subscribe(ctx, name)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	defer sub.Close()
+
+	waitCtx, cancel := context.WithTimeout(ctx, defaults.HTTPRequestTimeout)
+	defer cancel()
+
+	// wait for the headless authentication to be updated with valid login details
+	// by the login process. If the headless authentication is already updated,
+	// Wait will return it immediately.
+	headlessAuthn, err := a.headlessAuthenticationWatcher.WaitForUpdate(waitCtx, sub, func(ha *types.HeadlessAuthentication) (bool, error) {
+		return services.ValidateHeadlessAuthentication(ha) == nil, nil
+	})
+	return headlessAuthn, trace.Wrap(err)
+}
+
+// CompareAndSwapHeadlessAuthentication performs a compare
+// and swap replacement on a headless authentication resource.
+func (a *Server) CompareAndSwapHeadlessAuthentication(ctx context.Context, old, new *types.HeadlessAuthentication) (*types.HeadlessAuthentication, error) {
+	headlessAuthn, err := a.Services.CompareAndSwapHeadlessAuthentication(ctx, old, new)
+	return headlessAuthn, trace.Wrap(err)
+}
+
+// getProxyPublicAddr returns the first valid, non-empty proxy public address it
+// finds, or empty otherwise.
+func (a *Server) getProxyPublicAddr() string {
+	if proxies, err := a.GetProxies(); err == nil {
+		for _, p := range proxies {
+			addr := p.GetPublicAddr()
+			if addr == "" {
+				continue
+			}
+			if _, err := utils.ParseAddr(addr); err != nil {
+				log.Warningf("Invalid public address on the proxy %q: %q: %v.", p.GetName(), addr, err)
+				continue
+			}
+			return addr
+		}
+	}
+	return ""
 }
 
 // authKeepAliver is a keep aliver using auth server directly
@@ -4749,7 +5093,16 @@ func WithClusterCAs(tlsConfig *tls.Config, ap AccessCache, currentClusterName st
 
 // DefaultDNSNamesForRole returns default DNS names for the specified role.
 func DefaultDNSNamesForRole(role types.SystemRole) []string {
-	if (types.SystemRoles{role}).IncludeAny(types.RoleAuth, types.RoleAdmin, types.RoleProxy, types.RoleKube, types.RoleApp, types.RoleDatabase, types.RoleWindowsDesktop) {
+	if (types.SystemRoles{role}).IncludeAny(
+		types.RoleAuth,
+		types.RoleAdmin,
+		types.RoleProxy,
+		types.RoleKube,
+		types.RoleApp,
+		types.RoleDatabase,
+		types.RoleWindowsDesktop,
+		types.RoleOkta,
+	) {
 		return []string{
 			"*." + constants.APIDomain,
 			constants.APIDomain,

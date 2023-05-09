@@ -37,7 +37,6 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/http/httpproxy"
 
-	"github.com/gravitational/teleport/api/client/proxy"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/defaults"
 	"github.com/gravitational/teleport/api/observability/tracing"
@@ -93,7 +92,7 @@ func newWebClient(cfg *Config) (*http.Client, error) {
 		return nil, trace.Wrap(err)
 	}
 
-	rt := proxy.NewHTTPRoundTripper(&http.Transport{
+	rt := utils.NewHTTPRoundTripper(&http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.Insecure,
 			RootCAs:            cfg.Pool,
@@ -286,8 +285,10 @@ type PingResponse struct {
 	MinClientVersion string `json:"min_client_version"`
 	// ClusterName contains the name of the Teleport cluster.
 	ClusterName string `json:"cluster_name"`
-	// LicenseWarnings contains a list of license compliance warning messages
-	LicenseWarnings []string `json:"license_warnings,omitempty"`
+
+	// reserved: license_warnings ([]string)
+	// AutomaticUpgrades describes whether agents should automatically upgrade.
+	AutomaticUpgrades bool `json:"automatic_upgrades"`
 }
 
 // PingErrorResponse contains the error message if the requested connector
@@ -377,6 +378,8 @@ type AuthenticationSettings struct {
 	PreferredLocalMFA constants.SecondFactorType `json:"preferred_local_mfa,omitempty"`
 	// AllowPasswordless is true if passwordless logins are allowed.
 	AllowPasswordless bool `json:"allow_passwordless,omitempty"`
+	// AllowHeadless is true if headless logins are allowed.
+	AllowHeadless bool `json:"allow_headless,omitempty"`
 	// Local contains settings for local authentication.
 	Local *LocalSettings `json:"local,omitempty"`
 	// Webauthn contains MFA settings for Web Authentication.
