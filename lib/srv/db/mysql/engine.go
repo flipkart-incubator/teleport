@@ -250,6 +250,7 @@ func (e *Engine) connect(ctx context.Context, sessionCtx *common.Session) (*clie
 		user = services.MakeAzureDatabaseLoginUsername(sessionCtx.Database, user)
 	case e.Auth.IsTokenAuthEnabled() && sessionCtx.Database.IsTokenAuthEnabled():
 		user, password, err = e.Auth.GetTokenAuthCredentials(ctx, sessionCtx)
+		connectOpt = func(conn *client.Conn) {}
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
