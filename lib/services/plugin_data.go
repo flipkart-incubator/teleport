@@ -17,11 +17,27 @@ limitations under the License.
 package services
 
 import (
+	"context"
+
 	"github.com/gravitational/trace"
 
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/utils"
 )
+
+// PluginDataGetter defines the interface for getting plugin data.
+type PluginDataGetter interface {
+	// GetPluginData loads all plugin data matching the supplied filter.
+	GetPluginData(ctx context.Context, filter types.PluginDataFilter) ([]types.PluginData, error)
+}
+
+// PluginData defines the interface for managing plugin data.
+type PluginData interface {
+	PluginDataGetter
+
+	// UpdatePluginData updates a per-resource PluginData entry.
+	UpdatePluginData(ctx context.Context, params types.PluginDataUpdateParams) error
+}
 
 // MarshalPluginData marshals the PluginData resource to JSON.
 func MarshalPluginData(pluginData types.PluginData, opts ...MarshalOption) ([]byte, error) {
@@ -41,6 +57,7 @@ func MarshalPluginData(pluginData types.PluginData, opts ...MarshalOption) ([]by
 			// to prevent unexpected data races
 			cp := *pluginData
 			cp.SetResourceID(0)
+			cp.SetRevision("")
 			pluginData = &cp
 		}
 		return utils.FastMarshal(pluginData)
@@ -64,6 +81,9 @@ func UnmarshalPluginData(raw []byte, opts ...MarshalOption) (types.PluginData, e
 	}
 	if cfg.ID != 0 {
 		data.SetResourceID(cfg.ID)
+	}
+	if cfg.Revision != "" {
+		data.SetRevision(cfg.Revision)
 	}
 	if !cfg.Expires.IsZero() {
 		data.SetExpiry(cfg.Expires)

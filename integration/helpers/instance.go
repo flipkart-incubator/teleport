@@ -276,7 +276,7 @@ type TeleInstance struct {
 	// Log specifies the instance logger
 	Log utils.Logger
 	InstanceListeners
-	Fds []servicecfg.FileDescriptor
+	Fds []*servicecfg.FileDescriptor
 }
 
 // InstanceConfig is an instance configuration
@@ -298,7 +298,7 @@ type InstanceConfig struct {
 	// Ports is a collection of instance ports.
 	Listeners *InstanceListeners
 
-	Fds []servicecfg.FileDescriptor
+	Fds []*servicecfg.FileDescriptor
 }
 
 // NewInstance creates a new Teleport process instance.
@@ -1031,7 +1031,7 @@ type ProxyConfig struct {
 	// Disable ALPN routing
 	DisableALPNSNIListener bool
 	// FileDescriptors holds FDs to be injected into the Teleport process
-	FileDescriptors []servicecfg.FileDescriptor
+	FileDescriptors []*servicecfg.FileDescriptor
 }
 
 // StartProxy starts another Proxy Server and connects it to the cluster.
@@ -1317,9 +1317,15 @@ func (i *TeleInstance) NewUnauthenticatedClient(cfg ClientConfig) (tc *client.Te
 		sshProxyAddr = cfg.Proxy.SSHAddr
 		kubeProxyAddr = cfg.Proxy.KubeAddr
 	case cfg.ALBAddr != "":
-		webProxyAddr = cfg.ALBAddr
-		sshProxyAddr = cfg.ALBAddr
-		kubeProxyAddr = cfg.ALBAddr
+		if i.IsSinglePortSetup {
+			webProxyAddr = cfg.ALBAddr
+			sshProxyAddr = cfg.ALBAddr
+			kubeProxyAddr = cfg.ALBAddr
+		} else {
+			webProxyAddr = cfg.ALBAddr
+			sshProxyAddr = i.SSHProxy
+			kubeProxyAddr = i.Config.Proxy.Kube.ListenAddr.Addr
+		}
 	default:
 		webProxyAddr = i.Web
 		sshProxyAddr = i.SSHProxy

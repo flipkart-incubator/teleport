@@ -37,12 +37,14 @@ import (
 	"github.com/pquerna/otp/totp"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/api"
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/constants"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
+	userpreferencesv1 "github.com/gravitational/teleport/api/gen/proto/go/userpreferences/v1"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/api/types/installers"
@@ -619,6 +621,107 @@ func TestSSODiagnosticInfo(t *testing.T) {
 	info, err = clientPriv.GetSSODiagnosticInfo(ctx, types.KindSAML, "ABC123")
 	require.NoError(t, err)
 	require.Equal(t, &infoCreate, info)
+}
+
+func TestGenerateUserCertsForHeadlessKube(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	srv := newTestTLSServer(t)
+
+	const kubeClusterName = "kube-cluster-1"
+	kubeCluster, err := types.NewKubernetesClusterV3(
+		types.Metadata{
+			Name: kubeClusterName,
+		},
+		types.KubernetesClusterSpecV3{},
+	)
+	require.NoError(t, err)
+
+	kubeServer, err := types.NewKubernetesServerV3(
+		types.Metadata{
+			Name:   kubeClusterName,
+			Labels: map[string]string{"name": kubeClusterName},
+		},
+
+		types.KubernetesServerSpecV3{
+			HostID:   kubeClusterName,
+			Hostname: "test",
+			Cluster:  kubeCluster,
+		},
+	)
+	require.NoError(t, err)
+
+	_, err = srv.Auth().UpsertKubernetesServer(ctx, kubeServer)
+	require.NoError(t, err)
+
+	// Create test user1.
+	user1, _, err := CreateUserAndRole(srv.Auth(), "user1", []string{"role1"}, nil)
+	require.NoError(t, err)
+
+	// Create test user2.
+	user2, role2, err := CreateUserAndRole(srv.Auth(), "user2", []string{"role2"}, nil)
+	require.NoError(t, err)
+
+	role2Opts := role2.GetOptions()
+	role2Opts.MaxSessionTTL = types.NewDuration(2 * time.Hour)
+	role2.SetOptions(role2Opts)
+
+	err = srv.Auth().UpsertRole(ctx, role2)
+	require.NoError(t, err)
+
+	err = srv.Auth().UpdateUser(ctx, user1)
+	require.NoError(t, err)
+
+	err = srv.Auth().UpdateUser(ctx, user2)
+	require.NoError(t, err)
+	authPrefs, err := srv.Auth().GetAuthPreference(ctx)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		desc       string
+		user       types.User
+		expiration time.Time
+	}{
+		{
+			desc:       "Roles don't have max_session_ttl set",
+			user:       user1,
+			expiration: time.Now().Add(authPrefs.GetDefaultSessionTTL().Duration()),
+		},
+		{
+			desc:       "Roles have max_session_ttl set, cert expiration adjusted",
+			user:       user2,
+			expiration: time.Now().Add(2 * time.Hour),
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.desc, func(t *testing.T) {
+			client, err := srv.NewClient(TestUser(tt.user.GetName()))
+			require.NoError(t, err)
+
+			_, pub, err := testauthority.New().GenerateKeyPair()
+			require.NoError(t, err)
+
+			certs, err := client.GenerateUserCerts(ctx, proto.UserCertsRequest{
+				PublicKey:         pub,
+				Username:          tt.user.GetName(),
+				Expires:           time.Now().Add(time.Hour),
+				KubernetesCluster: kubeClusterName,
+				RequesterName:     proto.UserCertsRequest_TSH_KUBE_LOCAL_PROXY_HEADLESS,
+				Usage:             proto.UserCertsRequest_Kubernetes,
+			})
+			require.NoError(t, err)
+
+			// Parse the Identity
+			tlsCert, err := tlsca.ParseCertificatePEM(certs.TLS)
+			require.NoError(t, err)
+			identity, err := tlsca.FromSubject(tlsCert.Subject, tlsCert.NotAfter)
+			require.NoError(t, err)
+			require.True(t, tt.expiration.Sub(identity.Expires).Abs() < 10*time.Second,
+				"Identity expiration is out of expected boundaries")
+		})
+	}
 }
 
 func TestGenerateUserCertsWithRoleRequest(t *testing.T) {
@@ -1783,33 +1886,33 @@ func TestDatabasesCRUDRBAC(t *testing.T) {
 	db, err := devClt.GetDatabase(ctx, devDatabase.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(devDatabase, db,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Admin can get both databases.
 	db, err = adminClt.GetDatabase(ctx, adminDatabase.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(adminDatabase, db,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 	db, err = adminClt.GetDatabase(ctx, devDatabase.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(devDatabase, db,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// When listing databases, dev should only see one.
 	dbs, err := devClt.GetDatabases(ctx)
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff([]types.Database{devDatabase}, dbs,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Admin should see both.
 	dbs, err = adminClt.GetDatabases(ctx)
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff([]types.Database{adminDatabase, devDatabase}, dbs,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Dev shouldn't be able to delete dev database...
@@ -1903,7 +2006,7 @@ func mustGetDatabases(t *testing.T, client *Client, wantDatabases []types.Databa
 	require.NoError(t, err)
 
 	require.Empty(t, cmp.Diff(wantDatabases, actualDatabases,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 		cmpopts.EquateEmpty(),
 	))
 }
@@ -1958,7 +2061,7 @@ func TestKubernetesClusterCRUD_DiscoveryService(t *testing.T) {
 	t.Run("Read", func(t *testing.T) {
 		clusters, err := discoveryClt.GetKubernetesClusters(ctx)
 		require.NoError(t, err)
-		require.Empty(t, cmp.Diff([]types.KubeCluster{eksCluster}, clusters))
+		require.Empty(t, cmp.Diff([]types.KubeCluster{eksCluster}, clusters, cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")))
 	})
 	t.Run("Update", func(t *testing.T) {
 		require.NoError(t, discoveryClt.UpdateKubernetesCluster(ctx, eksCluster))
@@ -2481,33 +2584,33 @@ func TestApps(t *testing.T) {
 	app, err := devClt.GetApp(ctx, devApp.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(devApp, app,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Admin can get both apps.
 	app, err = adminClt.GetApp(ctx, adminApp.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(adminApp, app,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 	app, err = adminClt.GetApp(ctx, devApp.GetName())
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff(devApp, app,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// When listing apps, dev should only see one.
 	apps, err := devClt.GetApps(ctx)
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff([]types.Application{devApp}, apps,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Admin should see both.
 	apps, err = adminClt.GetApps(ctx)
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff([]types.Application{adminApp, devApp}, apps,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Dev shouldn't be able to delete dev app...
@@ -2532,7 +2635,7 @@ func TestApps(t *testing.T) {
 	apps, err = adminClt.GetApps(ctx)
 	require.NoError(t, err)
 	require.Empty(t, cmp.Diff([]types.Application{adminApp}, apps,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 	))
 
 	// Admin should be able to delete all.
@@ -3610,7 +3713,10 @@ func TestListResources_KindUserGroup(t *testing.T) {
 
 		userGroups, err := types.ResourcesWithLabels(res.Resources).AsUserGroups()
 		require.NoError(t, err)
-		require.ElementsMatch(t, []types.UserGroup{testUg1, testUg2, testUg3}, userGroups)
+		slices.SortFunc(userGroups, func(a, b types.UserGroup) int {
+			return strings.Compare(a.GetName(), b.GetName())
+		})
+		require.Empty(t, cmp.Diff([]types.UserGroup{testUg2, testUg3, testUg1}, userGroups, cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")))
 	})
 
 	t.Run("start keys", func(t *testing.T) {
@@ -4188,8 +4294,9 @@ func TestListUnifiedResources_KindsFilter(t *testing.T) {
 	clt, err := srv.NewClient(TestUser(user.GetName()))
 	require.NoError(t, err)
 	resp, err := clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
-		Kinds: []string{types.KindDatabase},
-		Limit: 5,
+		Kinds:  []string{types.KindDatabase},
+		Limit:  5,
+		SortBy: types.SortBy{IsDesc: true, Field: types.ResourceMetadataName},
 	})
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
@@ -4202,13 +4309,69 @@ func TestListUnifiedResources_KindsFilter(t *testing.T) {
 	}
 }
 
+func TestListUnifiedResources_WithPinnedResources(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := newTestTLSServer(t)
+	names := []string{"tifa", "cloud", "aerith", "baret", "cid", "tifa2"}
+	for _, name := range names {
+
+		// add nodes
+		node, err := types.NewServerWithLabels(
+			name,
+			types.KindNode,
+			types.ServerSpecV2{
+				Hostname: name,
+			},
+			map[string]string{"name": name},
+		)
+		require.NoError(t, err)
+
+		_, err = srv.Auth().UpsertNode(ctx, node)
+		require.NoError(t, err)
+	}
+
+	// create user, role, and client
+	username := "theuser"
+	user, _, err := CreateUserAndRole(srv.Auth(), username, nil, nil)
+	require.NoError(t, err)
+	identity := TestUser(user.GetName())
+
+	// pin a resource
+	pinned := &userpreferencesv1.PinnedResourcesUserPreferences{
+		ResourceIds: []string{"tifa/tifa/node"},
+	}
+	clusterPrefs := &userpreferencesv1.ClusterUserPreferences{
+		PinnedResources: pinned,
+	}
+
+	req := &userpreferencesv1.UpsertUserPreferencesRequest{
+		Preferences: &userpreferencesv1.UserPreferences{
+			ClusterPreferences: clusterPrefs,
+		},
+	}
+	err = srv.Auth().UpsertUserPreferences(ctx, username, req.Preferences)
+	require.NoError(t, err)
+
+	clt, err := srv.NewClient(identity)
+	require.NoError(t, err)
+	resp, err := clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
+		PinnedOnly: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Resources, 1)
+	require.Empty(t, resp.NextKey)
+	// Check that our returned resource is the pinned resource
+	require.Equal(t, "tifa", resp.Resources[0].GetNode().GetHostname())
+}
+
 // TestListUnifiedResources_WithSearch will generate multiple resources
 // and filter by a search query
 func TestListUnifiedResources_WithSearch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	srv := newTestTLSServer(t)
-	names := []string{"tifa", "cloud", "aerith", "baret", "cid", "tifa2"}
+	names := []string{"vivi", "cloud", "aerith", "barret", "cid", "vivi2"}
 	for i := 0; i < 6; i++ {
 		name := names[i]
 		node, err := types.NewServerWithLabels(
@@ -4228,6 +4391,19 @@ func TestListUnifiedResources_WithSearch(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, testNodes, 6)
 
+	sp := &types.SAMLIdPServiceProviderV1{
+		ResourceHeader: types.ResourceHeader{
+			Metadata: types.Metadata{
+				Name: "tifaSAML",
+			},
+		},
+		Spec: types.SAMLIdPServiceProviderSpecV1{
+			EntityDescriptor: newEntityDescriptor("tifaSAML"),
+			EntityID:         "tifaSAML",
+		},
+	}
+	require.NoError(t, srv.Auth().CreateSAMLIdPServiceProvider(ctx, sp))
+
 	// create user and client
 	user, _, err := CreateUserAndRole(srv.Auth(), "user", nil, nil)
 	require.NoError(t, err)
@@ -4236,15 +4412,16 @@ func TestListUnifiedResources_WithSearch(t *testing.T) {
 	resp, err := clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
 		SearchKeywords: []string{"tifa"},
 		Limit:          10,
+		SortBy:         types.SortBy{IsDesc: true, Field: types.ResourceMetadataName},
 	})
 	require.NoError(t, err)
-	require.Len(t, resp.Resources, 2)
+	require.Len(t, resp.Resources, 1)
 	require.Empty(t, resp.NextKey)
 
 	// Check that our returned resource has the correct name
 	for _, resource := range resp.Resources {
-		r := resource.GetNode()
-		require.True(t, strings.Contains(r.GetHostname(), "tifa"))
+		r := resource.GetAppServerOrSAMLIdPServiceProvider()
+		require.True(t, strings.Contains(r.GetName(), "tifa"))
 	}
 }
 
@@ -4293,7 +4470,7 @@ func TestListUnifiedResources_MixedAccess(t *testing.T) {
 		require.NoError(t, err)
 
 		// add desktops
-		desktop, err := types.NewWindowsDesktopV3(name, map[string]string{"name": "mylabel"},
+		desktop, err := types.NewWindowsDesktopV3(name, nil,
 			types.WindowsDesktopSpecV3{Addr: "_", HostID: "_"})
 		require.NoError(t, err)
 		require.NoError(t, srv.Auth().UpsertWindowsDesktop(ctx, desktop))
@@ -4313,23 +4490,38 @@ func TestListUnifiedResources_MixedAccess(t *testing.T) {
 	// create user, role, and client
 	username := "user"
 	user, role, err := CreateUserAndRole(srv.Auth(), username, nil, nil)
-	// remove permission from nodes and desktops
-	role.SetNodeLabels(types.Deny, types.Labels{"name": {"mylabel"}})
-	require.NoError(t, srv.Auth().UpsertRole(ctx, role))
 	require.NoError(t, err)
+
+	role.SetNodeLabels(types.Allow, types.Labels{"*": {"*"}})
+	role.SetDatabaseLabels(types.Allow, types.Labels{"*": {"*"}})
+	role.SetWindowsDesktopLabels(types.Allow, types.Labels{"*": {"*"}})
+	err = srv.Auth().UpsertRole(ctx, role)
+	require.NoError(t, err)
+	// remove permission from nodes by labels
+	role.SetNodeLabels(types.Deny, types.Labels{"name": {"mylabel"}})
+	// remove permission from desktops by rule
+	denyRules := []types.Rule{{
+		Resources: []string{types.KindWindowsDesktop},
+		Verbs:     []string{types.VerbList, types.VerbRead},
+	}}
+	role.SetRules(types.Deny, denyRules)
+	err = srv.Auth().UpsertRole(ctx, role)
+	require.NoError(t, err)
+	// require.NoError(t, err)
 	identity := TestUser(user.GetName())
 	clt, err := srv.NewClient(identity)
 	require.NoError(t, err)
 
 	require.NoError(t, err)
 	resp, err := clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
-		Limit: 10,
+		Limit:  20,
+		SortBy: types.SortBy{IsDesc: true, Field: types.ResourceMetadataName},
 	})
 	require.NoError(t, err)
 	require.Len(t, resp.Resources, 6)
 	require.Empty(t, resp.NextKey)
 
-	// only receive databases
+	// only receive databases because nodes are denied with labels and desktops are denied with a verb rule
 	for _, resource := range resp.Resources {
 		r := resource.GetDatabaseServer()
 		require.Equal(t, types.KindDatabaseServer, r.GetKind())
@@ -4376,10 +4568,19 @@ func TestListUnifiedResources_WithPredicate(t *testing.T) {
 	resp, err := clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
 		PredicateExpression: `labels.name == "tifa"`,
 		Limit:               10,
+		SortBy:              types.SortBy{IsDesc: true, Field: types.ResourceMetadataName},
 	})
 	require.NoError(t, err)
 	require.Len(t, resp.Resources, 1)
 	require.Empty(t, resp.NextKey)
+
+	// fail with bad predicate expression
+	_, err = clt.ListUnifiedResources(ctx, &proto.ListUnifiedResourcesRequest{
+		PredicateExpression: `labels.name == "tifa`,
+		Limit:               10,
+		SortBy:              types.SortBy{IsDesc: true, Field: types.ResourceMetadataName},
+	})
+	require.Error(t, err)
 }
 
 // go test ./lib/auth -bench=BenchmarkListUnifiedResources -run=^$ -v -benchtime 1x
@@ -4388,9 +4589,9 @@ func TestListUnifiedResources_WithPredicate(t *testing.T) {
 // pkg: github.com/gravitational/teleport/lib/auth
 // BenchmarkListUnifiedResources
 // BenchmarkListUnifiedResources/simple_labels
-// BenchmarkListUnifiedResources/simple_labels-10                 1        22900895292 ns/op       15071189320 B/op        272733781 allocs/op
+// BenchmarkListUnifiedResources/simple_labels-10                 1         653696459 ns/op        480570296 B/op   8241706 allocs/op
 // PASS
-// ok      github.com/gravitational/teleport/lib/auth      25.135s
+// ok      github.com/gravitational/teleport/lib/auth      2.878s
 func BenchmarkListUnifiedResources(b *testing.B) {
 	const nodeCount = 50_000
 	const roleCount = 32
@@ -4497,7 +4698,8 @@ func benchmarkListUnifiedResources(
 	for n := 0; n < b.N; n++ {
 		var resources []*proto.PaginatedResource
 		req := &proto.ListUnifiedResourcesRequest{
-			Limit: 1_000,
+			SortBy: types.SortBy{IsDesc: false, Field: types.ResourceMetadataName},
+			Limit:  1_000,
 		}
 		for {
 			rsp, err := clt.ListUnifiedResources(ctx, req)
@@ -6379,7 +6581,7 @@ func TestCreateAccessRequest(t *testing.T) {
 			// We have to ignore the name here, as it's auto-generated by the underlying access request
 			// logic.
 			require.Empty(t, cmp.Diff(test.expected, accessRequests[0],
-				cmpopts.IgnoreFields(types.Metadata{}, "Name", "ID"),
+				cmpopts.IgnoreFields(types.Metadata{}, "Name", "ID", "Revision"),
 				cmpopts.IgnoreFields(types.AccessRequestSpecV3{}),
 			))
 		})

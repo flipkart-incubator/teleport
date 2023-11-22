@@ -41,8 +41,7 @@ import {
 
 import { assertUnreachable, retryWithRelogin } from '../utils';
 
-import { hasConnectMyComputerPermissions } from './permissions';
-
+import { ConnectMyComputerAccess, getConnectMyComputerAccess } from './access';
 import {
   checkAgentCompatibility,
   AgentCompatibility,
@@ -77,7 +76,24 @@ export type CurrentAction =
     };
 
 export interface ConnectMyComputerContext {
+  /**
+   * canUse describes whether the user should be allowed to use Connect My Computer.
+   * This is true either when the user has access to Connect My Computer or they have already set up
+   * the agent.
+   *
+   * The second case is there to protect from a scenario where a malicious admin lets the user set
+   * up the agent but then revokes their access for creating tokens. Without checking if the agent
+   * was already set up, the user would have lost control over the agent.
+   * https://github.com/gravitational/teleport/blob/master/rfd/0133-connect-my-computer.md#access-to-ui-and-autostart
+   */
   canUse: boolean;
+  /**
+   * access describes whether the user has the necessary requirements to use Connect My Computer. It
+   * does not account for the agent being already set up. Thus it's mostly useful in scenarios where
+   * this has been already accounted for, for example when showing an alert about insufficient
+   * permissions in the setup step.
+   */
+  access: ConnectMyComputerAccess;
   currentAction: CurrentAction;
   agentProcessState: AgentProcessState;
   agentNode: Server | undefined;
@@ -104,7 +120,6 @@ export const ConnectMyComputerContextProvider: FC<{
     mainProcessClient,
     connectMyComputerService,
     clustersService,
-    configService,
     workspacesService,
     usageService,
   } = ctx;
@@ -125,19 +140,18 @@ export const ConnectMyComputerContextProvider: FC<{
     isAgentConfiguredAttempt.data;
 
   const rootCluster = clustersService.findCluster(rootClusterUri);
-  const canUse = useMemo(() => {
-    const isFeatureFlagEnabled = configService.get(
-      'feature.connectMyComputer'
-    ).value;
-    const hasPermissions = hasConnectMyComputerPermissions(
-      rootCluster,
-      mainProcessClient.getRuntimeSettings()
-    );
+  const { loggedInUser } = rootCluster;
 
-    // We check `isAgentConfigured`, because the user should always have access to the agent after configuring it.
-    // https://github.com/gravitational/teleport/blob/master/rfd/0133-connect-my-computer.md#access-to-ui-and-autostart
-    return isFeatureFlagEnabled && (hasPermissions || isAgentConfigured);
-  }, [configService, isAgentConfigured, mainProcessClient, rootCluster]);
+  const access = useMemo(
+    () =>
+      getConnectMyComputerAccess(
+        loggedInUser,
+        mainProcessClient.getRuntimeSettings()
+      ),
+    [loggedInUser, mainProcessClient]
+  );
+  const canUse = access.status === 'ok' || isAgentConfigured;
+
   const agentCompatibility = useMemo(
     () =>
       checkAgentCompatibility(
@@ -234,7 +248,9 @@ export const ConnectMyComputerContextProvider: FC<{
   const [killAgentAttempt, killAgent] = useAsync(
     useCallback(async () => {
       setCurrentActionKind('kill');
+
       await connectMyComputerService.killAgent(rootClusterUri);
+
       setCurrentActionKind('observe-process');
       workspacesService.setConnectMyComputerAutoStart(rootClusterUri, false);
     }, [connectMyComputerService, rootClusterUri, workspacesService])
@@ -243,6 +259,7 @@ export const ConnectMyComputerContextProvider: FC<{
   const markAgentAsConfigured = useCallback(() => {
     setAgentConfiguredAttempt(makeSuccessAttempt(true));
   }, [setAgentConfiguredAttempt]);
+
   const markAgentAsNotConfigured = useCallback(() => {
     setDownloadAgentAttempt(makeEmptyAttempt());
     setAgentConfiguredAttempt(makeSuccessAttempt(false));
@@ -269,10 +286,12 @@ export const ConnectMyComputerContextProvider: FC<{
 
   const [removeAgentAttempt, removeAgent] = useAsync(
     useCallback(async () => {
+      // killAgent sets the current action to 'kill'.
       const [, error] = await killAgent();
       if (error) {
         throw error;
       }
+
       setCurrentActionKind('remove');
 
       let hasAccessDeniedError = false;
@@ -301,6 +320,18 @@ export const ConnectMyComputerContextProvider: FC<{
 
       // We have to remove connections before removing the agent directory, because
       // we get the node UUID from the that directory.
+      //
+      // Theoretically, removing connections only at this stage means that if there are active
+      // connections from the app at the time of killing the agent above, the shutdown of the agent
+      // will take a couple of extra seconds while the agent waits for the connections to close.
+      // However, we'd have to remove the connections before calling `killAgent` above and this
+      // messes up error handling somewhat. `removeConnections` would have to be executed after the
+      // current action is set to 'kill' so that any errors thrown by `removeConnections` are
+      // correctly reported in the UI.
+      //
+      // Otherwise, if `removeConnections` was called before `killAgent` and the function threw an
+      // error, it'd simply be swallowed. It'd be shown once the current action is set to 'remove',
+      // but this would never happen because of the error.
       await removeConnections();
       ctx.workspacesService.removeConnectMyComputerState(rootClusterUri);
       await ctx.connectMyComputerService.removeAgentDirectory(rootClusterUri);
@@ -409,6 +440,7 @@ export const ConnectMyComputerContextProvider: FC<{
     <ConnectMyComputerContext.Provider
       value={{
         canUse,
+        access,
         currentAction,
         agentProcessState,
         agentNode: startAgentAttempt.data,

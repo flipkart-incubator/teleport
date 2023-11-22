@@ -39,7 +39,7 @@ func NewSystemAutomaticAccessApproverRole() types.Role {
 	}
 	role := &types.RoleV6{
 		Kind:    types.KindRole,
-		Version: types.V7,
+		Version: types.V6,
 		Metadata: types.Metadata{
 			Name:        teleport.SystemAutomaticAccessApprovalRoleName,
 			Namespace:   apidefaults.Namespace,
@@ -138,6 +138,7 @@ func NewPresetEditorRole() types.Role {
 					types.NewRule(types.KindClusterName, RW()),
 					types.NewRule(types.KindClusterNetworkingConfig, RW()),
 					types.NewRule(types.KindSessionRecordingConfig, RW()),
+					types.NewRule(types.KindExternalCloudAudit, RW()),
 					types.NewRule(types.KindUIConfig, RW()),
 					types.NewRule(types.KindTrustedCluster, RW()),
 					types.NewRule(types.KindRemoteCluster, RW()),
@@ -162,6 +163,10 @@ func NewPresetEditorRole() types.Role {
 					types.NewRule(types.KindClusterAlert, RW()),
 					types.NewRule(types.KindAccessList, RW()),
 					types.NewRule(types.KindNode, RW()),
+					types.NewRule(types.KindDiscoveryConfig, RW()),
+					types.NewRule(types.KindSecurityReport, append(RW(), types.VerbUse)),
+					types.NewRule(types.KindAuditQuery, append(RW(), types.VerbUse)),
+					types.NewRule(types.KindAccessGraph, RW()),
 				},
 			},
 		},
@@ -265,6 +270,8 @@ func NewPresetAuditorRole() types.Role {
 					types.NewRule(types.KindSessionTracker, RO()),
 					types.NewRule(types.KindClusterAlert, RO()),
 					types.NewRule(types.KindInstance, RO()),
+					types.NewRule(types.KindSecurityReport, append(RO(), types.VerbUse)),
+					types.NewRule(types.KindAuditQuery, append(RO(), types.VerbUse)),
 				},
 			},
 		},

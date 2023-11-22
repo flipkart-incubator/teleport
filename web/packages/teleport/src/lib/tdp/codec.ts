@@ -14,16 +14,7 @@
  * limitations under the License.
  */
 
-import {
-  TextEncoder as TestTextEncoder,
-  TextDecoder as TestTextDecoder,
-} from 'util';
-
 import { arrayBufferToBase64 } from 'shared/utils/base64';
-
-// This is needed for tests until jsdom adds support for TextEncoder (https://github.com/jsdom/jsdom/issues/2524)
-window.TextEncoder = window.TextEncoder || TestTextEncoder;
-window.TextDecoder = window.TextDecoder || TestTextDecoder;
 
 export type Message = ArrayBuffer;
 
@@ -834,12 +825,17 @@ export default class Codec {
   decodeNotification(buffer: ArrayBuffer): Notification {
     const dv = new DataView(buffer);
     let offset = 0;
+
     offset += byteLength; // eat message type
+
     const messageLength = dv.getUint32(offset);
     offset += uint32Length; // eat messageLength
+
     const message = this.decodeStringMessage(buffer);
     offset += messageLength; // eat message
+
     const severity = dv.getUint8(offset);
+
     return {
       message,
       severity: toSeverity(severity),
@@ -867,8 +863,14 @@ export default class Codec {
   // decodeStringMessage decodes a tdp message of the form
   // | message type (N) | message_length uint32 | message []byte
   private decodeStringMessage(buffer: ArrayBuffer): string {
-    const offset = byteLength + uint32Length; // eat message type and message_length
-    return this.decoder.decode(new Uint8Array(buffer.slice(offset)));
+    const dv = new DataView(buffer);
+    let offset = byteLength; // eat message type
+    const msgLength = dv.getUint32(offset);
+    offset += uint32Length; // eat messageLength
+
+    return this.decoder.decode(
+      new Uint8Array(buffer.slice(offset, offset + msgLength))
+    );
   }
 
   // decodePngFrame decodes a raw tdp PNG frame message and returns it as a PngFrame

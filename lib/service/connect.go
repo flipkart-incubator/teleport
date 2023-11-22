@@ -96,7 +96,7 @@ func (process *TeleportProcess) reconnectToAuthService(role types.SystemRole) (*
 
 			// Ping failed, close the client and continue the loop.
 			process.log.Debugf("Connected client %v failed to execute test call: %v. Node or proxy credentials are out of sync.", role, pingErr)
-			if err := connector.Client.Close(); err != nil {
+			if err := connector.Close(); err != nil {
 				process.log.Debugf("Failed to close the client: %v.", err)
 			}
 		}
@@ -147,10 +147,10 @@ func (process *TeleportProcess) authServerTooOld(resp *proto.PingResponse) error
 
 	if serverVersion.Major < teleportVersion.Major {
 		if process.Config.SkipVersionCheck {
-			process.log.Warnf("Only versions %d and greater are supported, but auth server is version %d.", teleportVersion.Major, serverVersion.Major)
+			process.log.Warnf("Teleport instance is too new. This instance is running v%d. The auth server is running v%d and only supports instances on v%d or v%d.", teleportVersion.Major, serverVersion.Major, serverVersion.Major, serverVersion.Major-1)
 			return nil
 		}
-		return trace.NotImplemented("only versions %d and greater are supported, but auth server is version %d. To connect anyway pass the '--skip-version-check' flag.", teleportVersion.Major, serverVersion.Major)
+		return trace.NotImplemented("Teleport instance is too new. This instance is running v%d. The auth server is running v%d and only supports instances on v%d or v%d. To connect anyway pass the --skip-version-check flag.", teleportVersion.Major, serverVersion.Major, serverVersion.Major, serverVersion.Major-1)
 	}
 
 	return nil
@@ -184,7 +184,8 @@ func (process *TeleportProcess) connect(role types.SystemRole, opts ...certOptio
 		}
 		// no state recorded - this is the first connect
 		// process will try to connect with the security token.
-		return process.firstTimeConnect(role)
+		c, err := process.firstTimeConnect(role)
+		return c, trace.Wrap(err)
 	}
 	process.log.Debugf("Connected state: %v.", state.Spec.Rotation.String())
 

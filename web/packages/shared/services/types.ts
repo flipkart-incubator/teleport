@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { privateKeyEnablingPolicies } from './consts';
-
 export type AuthProviderType = 'oidc' | 'saml' | 'github';
 
 export type Auth2faType = 'otp' | 'off' | 'optional' | 'on' | 'webauthn';
@@ -45,6 +43,5 @@ export type AuthProvider = {
   url: string;
 };
 
-export type PrivateKeyPolicy =
-  | 'none'
-  | typeof privateKeyEnablingPolicies[number];
+/** Values are taken from https://github.com/gravitational/teleport/blob/0460786b4c3afced1350dd9362ce761806e1c99d/api/types/constants.go#L140-L154 */
+export type NodeSubKind = 'teleport' | 'openssh' | 'openssh-ec2-ice';

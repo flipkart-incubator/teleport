@@ -562,7 +562,7 @@ func TestCheckIPPinning(t *testing.T) {
 			desc:     "IP pinning enabled, missing client IP",
 			pinnedIP: "127.0.0.1",
 			pinIP:    true,
-			wantErr:  "expected type net.Addr, got <nil>",
+			wantErr:  "client source address was not found in the context",
 		},
 		{
 			desc:       "IP pinning enabled, port=0 (marked by proxyProtocolMode unspecified)",
@@ -582,7 +582,7 @@ func TestCheckIPPinning(t *testing.T) {
 	for _, tt := range testCases {
 		ctx := context.Background()
 		if tt.clientAddr != "" {
-			ctx = ContextWithClientAddr(ctx, utils.MustParseAddr(tt.clientAddr))
+			ctx = ContextWithClientSrcAddr(ctx, utils.MustParseAddr(tt.clientAddr))
 		}
 		identity := tlsca.Identity{PinnedIP: tt.pinnedIP}
 
@@ -827,6 +827,6 @@ func createUserAndRole(client *testClient, username string, allowedLogins []stri
 
 func resourceDiff(res1, res2 types.Resource) string {
 	return cmp.Diff(res1, res2,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Namespace"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision", "Namespace"),
 		cmpopts.EquateEmpty())
 }

@@ -35,13 +35,15 @@ const (
 
 // AccessRequestData represents generic plugin data required for access request processing
 type AccessRequestData struct {
-	User              string
-	Roles             []string
-	RequestReason     string
-	ReviewsCount      int
-	ResolutionTag     ResolutionTag
-	ResolutionReason  string
-	SystemAnnotations map[string][]string
+	User               string
+	Roles              []string
+	RequestReason      string
+	ReviewsCount       int
+	ResolutionTag      ResolutionTag
+	ResolutionReason   string
+	SystemAnnotations  map[string][]string
+	Resources          []string
+	SuggestedReviewers []string
 }
 
 // DecodeAccessRequestData deserializes a string map to PluginData struct.
@@ -57,14 +59,33 @@ func DecodeAccessRequestData(dataMap map[string]string) (data AccessRequestData,
 	data.ResolutionTag = ResolutionTag(dataMap["resolution"])
 	data.ResolutionReason = dataMap["resolve_reason"]
 
-	if _, ok := dataMap["system_annotations"]; ok {
-		err = json.Unmarshal([]byte(dataMap["system_annotations"]), &data.SystemAnnotations)
+	if str, ok := dataMap["resources"]; ok {
+		err = json.Unmarshal([]byte(str), &data.Resources)
+		if err != nil {
+			err = trace.Wrap(err)
+			return
+		}
+	}
+
+	if str, ok := dataMap["system_annotations"]; ok {
+		err = json.Unmarshal([]byte(str), &data.SystemAnnotations)
 		if err != nil {
 			err = trace.Wrap(err)
 			return
 		}
 		if len(data.SystemAnnotations) == 0 {
 			data.SystemAnnotations = nil
+		}
+	}
+
+	if str, ok := dataMap["suggested_reviewers"]; ok {
+		err = json.Unmarshal([]byte(str), &data.SuggestedReviewers)
+		if err != nil {
+			err = trace.Wrap(err)
+			return
+		}
+		if len(data.SuggestedReviewers) == 0 {
+			data.SuggestedReviewers = nil
 		}
 	}
 	return
@@ -76,7 +97,16 @@ func EncodeAccessRequestData(data AccessRequestData) (map[string]string, error) 
 
 	result["user"] = data.User
 	result["roles"] = strings.Join(data.Roles, ",")
+	result["resources"] = strings.Join(data.Resources, ",")
 	result["request_reason"] = data.RequestReason
+
+	if len(data.Resources) != 0 {
+		resources, err := json.Marshal(data.Resources)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		result["resources"] = string(resources)
+	}
 
 	var reviewsCountStr string
 	if data.ReviewsCount > 0 {
@@ -92,6 +122,14 @@ func EncodeAccessRequestData(data AccessRequestData) (map[string]string, error) 
 			return nil, trace.Wrap(err)
 		}
 		result["system_annotations"] = string(annotaions)
+	}
+
+	if len(data.SuggestedReviewers) != 0 {
+		reviewers, err := json.Marshal(data.SuggestedReviewers)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		result["suggested_reviewers"] = string(reviewers)
 	}
 	return result, nil
 }

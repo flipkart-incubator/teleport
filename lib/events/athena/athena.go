@@ -34,6 +34,7 @@ import (
 
 	"github.com/gravitational/teleport"
 	apievents "github.com/gravitational/teleport/api/types/events"
+	"github.com/gravitational/teleport/api/types/externalcloudaudit"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/observability/metrics"
@@ -86,6 +87,9 @@ type Config struct {
 	// GetQueryResultsInterval is used to define how long query will wait before
 	// checking again for results status if previous status was not ready (optional).
 	GetQueryResultsInterval time.Duration
+	// DisableSearchCostOptimization is used to opt-out from search cost optimization
+	// used for paginated queries (optional). Default is enabled.
+	DisableSearchCostOptimization bool
 
 	// LimiterRefillTime determines the duration of time between the addition of tokens to the bucket (optional).
 	LimiterRefillTime time.Duration
@@ -113,9 +117,22 @@ type Config struct {
 	UIDGenerator utils.UID
 	// LogEntry is a log entry.
 	LogEntry *log.Entry
-	// AWSConfig is AWS config which can be used to construct varius AWS Clients
-	// using aws-sdk-go-v2.
-	AWSConfig *aws.Config
+
+	// PublisherConsumerAWSConfig is an AWS config which can be used to
+	// construct AWS Clients using aws-sdk-go-v2, used by the publisher and
+	// consumer components which publish/consume events from SQS (and S3 for
+	// large events). These are always hosted on Teleport cloud infra even when
+	// External Cloud Audit is enabled, any events written here are only held
+	// temporarily while they are queued to write to s3 parquet files in
+	// batches.
+	PublisherConsumerAWSConfig *aws.Config
+
+	// StorerQuerierAWSConfig is an AWS config which can be used to construct AWS Clients
+	// using aws-sdk-go-v2, used by the consumer (store phase) and the querier.
+	// Often it is the same as PublisherConsumerAWSConfig unless External Cloud
+	// Audit is enabled, then this will authenticate and connect to
+	// external/customer AWS account.
+	StorerQuerierAWSConfig *aws.Config
 
 	Backend backend.Backend
 
@@ -243,7 +260,7 @@ func (cfg *Config) CheckAndSetDefaults(ctx context.Context) error {
 		})
 	}
 
-	if cfg.AWSConfig == nil {
+	if cfg.PublisherConsumerAWSConfig == nil {
 		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
 		if err != nil {
 			return trace.Wrap(err)
@@ -254,7 +271,11 @@ func (cfg *Config) CheckAndSetDefaults(ctx context.Context) error {
 			awsCfg.Region = cfg.Region
 		}
 		otelaws.AppendMiddlewares(&awsCfg.APIOptions)
-		cfg.AWSConfig = &awsCfg
+		cfg.PublisherConsumerAWSConfig = &awsCfg
+	}
+
+	if cfg.StorerQuerierAWSConfig == nil {
+		cfg.StorerQuerierAWSConfig = cfg.PublisherConsumerAWSConfig
 	}
 
 	if cfg.Backend == nil {
@@ -308,6 +329,13 @@ func (cfg *Config) SetFromURL(url *url.URL) error {
 		}
 		cfg.GetQueryResultsInterval = dur
 	}
+	if val := url.Query().Get("disableSearchCostOptimization"); val != "" {
+		boolVal, err := strconv.ParseBool(val)
+		if err != nil {
+			return trace.BadParameter("invalid disableSearchCostOptimization value: %v", err)
+		}
+		cfg.DisableSearchCostOptimization = boolVal
+	}
 	refillAmountInString := url.Query().Get("limiterRefillAmount")
 	if refillAmountInString != "" {
 		refillAmount, err := strconv.Atoi(refillAmountInString)
@@ -357,6 +385,26 @@ func (cfg *Config) SetFromURL(url *url.URL) error {
 	return nil
 }
 
+func (cfg *Config) UpdateForExternalCloudAudit(ctx context.Context, spec *externalcloudaudit.ExternalCloudAuditSpec, credentialsProvider aws.CredentialsProvider) error {
+	cfg.LocationS3 = spec.AuditEventsLongTermURI
+	cfg.Workgroup = spec.AthenaWorkgroup
+	cfg.QueryResultsS3 = spec.AthenaResultsURI
+	cfg.Database = spec.GlueDatabase
+	cfg.TableName = spec.GlueTable
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(cfg.Region),
+		awsconfig.WithCredentialsProvider(credentialsProvider),
+	)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
+	cfg.StorerQuerierAWSConfig = &awsCfg
+
+	return nil
+}
+
 // Log is an events storage backend.
 //
 // It's using SNS for emitting events.
@@ -386,15 +434,16 @@ func New(ctx context.Context, cfg Config) (*Log, error) {
 	}
 
 	querier, err := newQuerier(querierConfig{
-		tablename:               cfg.TableName,
-		database:                cfg.Database,
-		workgroup:               cfg.Workgroup,
-		queryResultsS3:          cfg.QueryResultsS3,
-		getQueryResultsInterval: cfg.GetQueryResultsInterval,
-		awsCfg:                  cfg.AWSConfig,
-		logger:                  cfg.LogEntry,
-		clock:                   cfg.Clock,
-		tracer:                  cfg.Tracer,
+		tablename:                    cfg.TableName,
+		database:                     cfg.Database,
+		workgroup:                    cfg.Workgroup,
+		queryResultsS3:               cfg.QueryResultsS3,
+		getQueryResultsInterval:      cfg.GetQueryResultsInterval,
+		disableQueryCostOptimization: cfg.DisableSearchCostOptimization,
+		awsCfg:                       cfg.StorerQuerierAWSConfig,
+		logger:                       cfg.LogEntry,
+		clock:                        cfg.Clock,
+		tracer:                       cfg.Tracer,
 	})
 	if err != nil {
 		return nil, trace.Wrap(err)

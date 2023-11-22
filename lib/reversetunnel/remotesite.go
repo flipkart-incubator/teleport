@@ -764,19 +764,30 @@ func (s *remoteSite) DialAuthServer(params reversetunnelclient.DialParams) (net.
 // located in a remote connected site, the connection goes through the
 // reverse proxy tunnel.
 func (s *remoteSite) Dial(params reversetunnelclient.DialParams) (net.Conn, error) {
-	recConfig, err := s.localAccessPoint.GetSessionRecordingConfig(s.ctx)
+	localRecCfg, err := s.localAccessPoint.GetSessionRecordingConfig(s.ctx)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if err := checkNodeAndRecConfig(params, recConfig); err != nil {
+	if err := checkNodeAndRecConfig(params, localRecCfg); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	// If the proxy is in recording mode and a SSH connection is being
-	// requested or the target server is a registered OpenSSH node, build
-	// an in-memory forwarding server.
-	if shouldDialAndForward(params, recConfig) {
+	if shouldDialAndForward(params, localRecCfg) {
 		return s.dialAndForward(params)
+	}
+
+	if params.ConnType == types.NodeTunnel {
+		// If the remote cluster is recording at the proxy we need to respect
+		// that and forward and record the session. We will be connecting
+		// to the node without connecting through the remote proxy, so the
+		// session won't have a chance to get recorded at the remote proxy.
+		remoteRecCfg, err := s.remoteAccessPoint.GetSessionRecordingConfig(s.ctx)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		if services.IsRecordAtProxy(remoteRecCfg.GetMode()) {
+			return s.dialAndForward(params)
+		}
 	}
 
 	// Attempt to perform a direct TCP dial.
@@ -843,34 +854,32 @@ func (s *remoteSite) dialAndForward(params reversetunnelclient.DialParams) (_ ne
 	// Create a forwarding server that serves a single SSH connection on it. This
 	// server does not need to close, it will close and release all resources
 	// once conn is closed.
-	//
-	// Note: A localClient is passed to the forwarding server to make sure the
-	// session gets recorded in the local cluster instead of the remote cluster.
 	serverConfig := forward.ServerConfig{
-		AuthClient:      s.localClient,
-		UserAgent:       userAgent,
-		IsAgentlessNode: isAgentlessNode(params),
-		AgentlessSigner: params.AgentlessSigner,
-		TargetConn:      targetConn,
-		SrcAddr:         params.From,
-		DstAddr:         params.To,
-		HostCertificate: hostCertificate,
-		Ciphers:         s.srv.Config.Ciphers,
-		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
-		MACAlgorithms:   s.srv.Config.MACAlgorithms,
-		DataDir:         s.srv.Config.DataDir,
-		Address:         params.Address,
-		UseTunnel:       UseTunnel(s.logger, targetConn),
-		FIPS:            s.srv.FIPS,
-		HostUUID:        s.srv.ID,
-		Emitter:         s.srv.Config.Emitter,
-		ParentContext:   s.srv.Context,
-		LockWatcher:     s.srv.LockWatcher,
-		TargetID:        params.ServerID,
-		TargetAddr:      params.To.String(),
-		TargetHostname:  params.Address,
-		TargetServer:    params.TargetServer,
-		Clock:           s.clock,
+		LocalAuthClient:          s.localClient,
+		TargetClusterAccessPoint: s.remoteAccessPoint,
+		UserAgent:                userAgent,
+		IsAgentlessNode:          isAgentlessNode(params),
+		AgentlessSigner:          params.AgentlessSigner,
+		TargetConn:               targetConn,
+		SrcAddr:                  params.From,
+		DstAddr:                  params.To,
+		HostCertificate:          hostCertificate,
+		Ciphers:                  s.srv.Config.Ciphers,
+		KEXAlgorithms:            s.srv.Config.KEXAlgorithms,
+		MACAlgorithms:            s.srv.Config.MACAlgorithms,
+		DataDir:                  s.srv.Config.DataDir,
+		Address:                  params.Address,
+		UseTunnel:                UseTunnel(s.logger, targetConn),
+		FIPS:                     s.srv.FIPS,
+		HostUUID:                 s.srv.ID,
+		Emitter:                  s.srv.Config.Emitter,
+		ParentContext:            s.srv.Context,
+		LockWatcher:              s.srv.LockWatcher,
+		TargetID:                 params.ServerID,
+		TargetAddr:               params.To.String(),
+		TargetHostname:           params.Address,
+		TargetServer:             params.TargetServer,
+		Clock:                    s.clock,
 	}
 	// Ensure the hostname is set correctly if we have details of the target
 	if params.TargetServer != nil {

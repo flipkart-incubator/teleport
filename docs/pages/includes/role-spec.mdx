@@ -86,7 +86,6 @@ spec:
     # enterprise-only: when enabled, the source IP that was used to log in is embedded in the user
     # certificates, preventing a compromised certificate from being used on another
     # network. The default is false.
-    # Note: Source IP pinning is currently in Preview mode.
     pin_source_ip: true
     # Specify a list of names and associated values to be included in user SSH keys.
     # The key type can only be "ssh" and the mode can only be "extension".
@@ -102,7 +101,11 @@ spec:
     #          and off (disable host user creation)
     create_host_user_mode: drop
     # Controls whether this role requires automatic database user provisioning.
-    create_db_user: true
+    # Options: off (disable database user auto-provisioning), keep (disables the
+    # user at session end, removing the roles and locking it), and
+    # best_effort_drop (try to drop the user at session end, if it doesn't
+    # succeed, fallback to disabling it).
+    create_db_user_mode: keep
     # Specifies role specific options for identity provider access.
     idp:
       # Specifies role specific options for SAML identity provider access.
@@ -385,14 +388,16 @@ spec:
     # saml               - connector resource
     # github             - GitHub connector resource
     #
-    # trusted_cluster    - Trusted Cluster resource
+    # trusted_cluster    - Trusted cluster resource
     # remote_cluster     - remote cluster resource
     #
     # access_request     - Access Request resource
     # access_plugin_data - allows modifying Access Request plugin data
     #
     # session            - session playback records
-    # ssh_session        - an active SSH session
+    # session_tracker    - an active session
+    # ssh_session        - allows seeing active sessions page
+    # instance           - a Teleport instance
     # event              - structured audit logging event
     #
     #

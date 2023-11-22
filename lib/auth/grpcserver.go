@@ -47,18 +47,21 @@ import (
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/gen/proto/go/assist/v1"
 	auditlogpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/auditlog/v1"
+	discoveryconfigpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/discoveryconfig/v1"
 	integrationpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/integration/v1"
 	loginrulepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/loginrule/v1"
 	oktapb "github.com/gravitational/teleport/api/gen/proto/go/teleport/okta/v1"
 	trustpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/trust/v1"
 	userloginstatev1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/userloginstate/v1"
 	userpreferencespb "github.com/gravitational/teleport/api/gen/proto/go/userpreferences/v1"
+	"github.com/gravitational/teleport/api/internalutils/stream"
 	"github.com/gravitational/teleport/api/metadata"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
 	"github.com/gravitational/teleport/api/types/installers"
 	"github.com/gravitational/teleport/api/types/wrappers"
 	"github.com/gravitational/teleport/lib/auth/assist/assistv1"
+	"github.com/gravitational/teleport/lib/auth/discoveryconfig/discoveryconfigv1"
 	integrationService "github.com/gravitational/teleport/lib/auth/integration/integrationv1"
 	"github.com/gravitational/teleport/lib/auth/loginrule"
 	"github.com/gravitational/teleport/lib/auth/okta"
@@ -68,6 +71,7 @@ import (
 	wanlib "github.com/gravitational/teleport/lib/auth/webauthn"
 	"github.com/gravitational/teleport/lib/authz"
 	"github.com/gravitational/teleport/lib/backend"
+	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/httplib"
 	"github.com/gravitational/teleport/lib/joinserver"
@@ -333,7 +337,22 @@ func (g *GRPCServer) CreateAuditStream(stream authpb.AuthService_CreateAuditStre
 			setter := &events.NoOpPreparer{}
 			start := time.Now()
 			preparedEvent, _ := setter.PrepareSessionEvent(event)
-			err = eventStream.RecordEvent(stream.Context(), preparedEvent)
+			var errors []error
+			errors = append(errors, eventStream.RecordEvent(stream.Context(), preparedEvent))
+
+			// v13 clients expect this request to also emit the event, so emit here
+			// just for them.
+			switch event.GetType() {
+			// Don't emit really verbose events.
+			case events.ResizeEvent, events.SessionDiskEvent, events.SessionPrintEvent, events.AppSessionRequestEvent, "":
+			default:
+				clientVersion, versionExists := metadata.ClientVersionFromContext(stream.Context())
+				if versionExists && semver.New(clientVersion).Major <= 13 {
+					errors = append(errors, auth.EmitAuditEvent(stream.Context(), event))
+				}
+			}
+
+			err = trace.NewAggregate(errors...)
 			if err != nil {
 				switch {
 				case events.IsPermanentEmitError(err):
@@ -344,7 +363,7 @@ func (g *GRPCServer) CreateAuditStream(stream authpb.AuthService_CreateAuditStre
 					return trace.Wrap(err)
 				}
 			}
-			event.Size()
+
 			processed += int64(event.Size())
 			seconds := time.Since(streamStart) / time.Second
 			counter++
@@ -369,51 +388,70 @@ func (g *GRPCServer) CreateAuditStream(stream authpb.AuthService_CreateAuditStre
 const logInterval = 10000
 
 // WatchEvents returns a new stream of cluster events
-func (g *GRPCServer) WatchEvents(watch *authpb.Watch, stream authpb.AuthService_WatchEventsServer) error {
+func (g *GRPCServer) WatchEvents(watch *authpb.Watch, stream authpb.AuthService_WatchEventsServer) (err error) {
 	auth, err := g.authenticate(stream.Context())
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
+	return trace.Wrap(WatchEvents(watch, stream, auth.User.GetName(), auth))
+}
+
+// WatchEvent is a stream interface for sending events.
+type WatchEvent interface {
+	Context() context.Context
+	Send(*authpb.Event) error
+}
+
+type Watcher interface {
+	NewStream(ctx context.Context, watch types.Watch) (stream.Stream[types.Event], error)
+}
+
+// WatchEvents watches for events and streams them to the provided stream.
+func WatchEvents(watch *authpb.Watch, stream WatchEvent, componentName string, auth Watcher) error {
 	servicesWatch := types.Watch{
-		Name:                auth.User.GetName(),
+		Name:                componentName,
 		Kinds:               watch.Kinds,
 		AllowPartialSuccess: watch.AllowPartialSuccess,
 	}
 
-	watcher, err := auth.NewWatcher(stream.Context(), servicesWatch)
+	events, err := auth.NewStream(stream.Context(), servicesWatch)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	defer watcher.Close()
 
-	for {
-		select {
-		case <-stream.Context().Done():
-			return nil
-		case <-watcher.Done():
-			return watcher.Error()
-		case event := <-watcher.Events():
-			if role, ok := event.Resource.(*types.RoleV6); ok {
-				downgraded, err := maybeDowngradeRole(stream.Context(), role)
-				if err != nil {
-					return trace.Wrap(err)
-				}
-				event.Resource = downgraded
-			}
-			out, err := client.EventToGRPC(event)
+	defer func() {
+		serr := events.Done()
+		if err == nil {
+			err = serr
+		}
+	}()
+
+	for events.Next() {
+		event := events.Item()
+		if role, ok := event.Resource.(*types.RoleV6); ok {
+			downgraded, err := maybeDowngradeRole(stream.Context(), role)
 			if err != nil {
 				return trace.Wrap(err)
 			}
+			event.Resource = downgraded
+		}
+		out, err := client.EventToGRPC(event)
+		if err != nil {
+			return trace.Wrap(err)
+		}
 
-			size := float64(proto.Size(out))
-			watcherEventsEmitted.WithLabelValues(resourceLabel(event)).Observe(size)
-			watcherEventSizes.Observe(size)
+		size := float64(proto.Size(out))
+		watcherEventsEmitted.WithLabelValues(resourceLabel(event)).Observe(size)
+		watcherEventSizes.Observe(size)
 
-			if err := stream.Send(out); err != nil {
-				return trace.Wrap(err)
-			}
+		if err := stream.Send(out); err != nil {
+			return trace.Wrap(err)
 		}
 	}
+
+	// deferred cleanup func will inject stream error if needed
+	return nil
 }
 
 // resourceLabel returns the label for the provided types.Event
@@ -4057,7 +4095,7 @@ func (g *GRPCServer) UpsertWindowsDesktopService(ctx context.Context, service *t
 	// the server.Addr field. It's not useful for other services that want to
 	// connect to it (like a proxy). Remote address of the gRPC connection is
 	// the closest thing we have to a public IP for the service.
-	clientAddr, err := authz.ClientAddrFromContext(ctx)
+	clientAddr, err := authz.ClientSrcAddrFromContext(ctx)
 	if err != nil {
 		g.Logger.WithError(err).Warn("error getting client address from context")
 		return nil, status.Errorf(codes.FailedPrecondition, "client address not found in request context")
@@ -4387,7 +4425,7 @@ func (g *GRPCServer) ListResources(ctx context.Context, req *authpb.ListResource
 		return nil, trace.Wrap(err)
 	}
 
-	paginatedResources, err := auth.MakePaginatedResources(req.ResourceType, resp.Resources)
+	paginatedResources, err := services.MakePaginatedResources(req.ResourceType, resp.Resources)
 	if err != nil {
 		return nil, trace.Wrap(err, "making paginated resources")
 	}
@@ -5306,6 +5344,7 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 				PermitWithoutStream: true,
 			},
 		),
+		grpc.MaxConcurrentStreams(defaults.GRPCMaxConcurrentStreams),
 	)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -5374,6 +5413,16 @@ func NewGRPCServer(cfg GRPCServerConfig) (*GRPCServer, error) {
 		return nil, trace.Wrap(err)
 	}
 	integrationpb.RegisterIntegrationServiceServer(server, integrationServiceServer)
+
+	discoveryConfig, err := discoveryconfigv1.NewService(discoveryconfigv1.ServiceConfig{
+		Authorizer: cfg.Authorizer,
+		Backend:    cfg.AuthServer.Services,
+		Clock:      cfg.AuthServer.clock,
+	})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	discoveryconfigpb.RegisterDiscoveryConfigServiceServer(server, discoveryConfig)
 
 	// Initialize and register the user preferences service.
 	userPreferencesSrv, err := userpreferencesv1.NewService(&userpreferencesv1.ServiceConfig{

@@ -25,7 +25,7 @@ import {
   UserPreferences,
 } from 'teleport/services/userPreferences/types';
 
-import { KeysEnum, LocalStorageSurvey } from './types';
+import { CloudUserInvites, KeysEnum, LocalStorageSurvey } from './types';
 
 import type { RecommendFeature } from 'teleport/types';
 
@@ -142,6 +142,24 @@ const storage = {
     window.localStorage.removeItem(KeysEnum.ONBOARD_SURVEY);
   },
 
+  getCloudUserInvites(): CloudUserInvites {
+    const invites = window.localStorage.getItem(KeysEnum.CLOUD_USER_INVITES);
+    if (invites) {
+      return JSON.parse(invites);
+    }
+    return null;
+  },
+
+  setCloudUserInvites(invites: CloudUserInvites) {
+    const json = JSON.stringify(invites);
+
+    window.localStorage.setItem(KeysEnum.CLOUD_USER_INVITES, json);
+  },
+
+  clearCloudUserInvites() {
+    window.localStorage.removeItem(KeysEnum.CLOUD_USER_INVITES);
+  },
+
   getThemePreference(): ThemePreference {
     const userPreferences = storage.getUserPreferences();
     if (userPreferences) {
@@ -199,6 +217,13 @@ const storage = {
     return disabled !== 'true' && notSupported !== 'true';
   },
 
+  arePinnedResourcesDisabled(): boolean {
+    return (
+      window.localStorage.getItem(KeysEnum.PINNED_RESOURCES_NOT_SUPPORTED) ===
+      'true'
+    );
+  },
+
   broadcast(messageType, messageBody) {
     window.localStorage.setItem(messageType, messageBody);
     window.localStorage.removeItem(messageType);
@@ -217,6 +242,22 @@ const storage = {
       return JSON.parse(item);
     }
     return null;
+  },
+
+  getAccessGraphEnabled(): boolean {
+    const item = window.localStorage.getItem(KeysEnum.ACCESS_GRAPH_ENABLED);
+    if (item) {
+      return JSON.parse(item);
+    }
+    return false;
+  },
+
+  getAccessGraphSQLEnabled(): boolean {
+    const item = window.localStorage.getItem(KeysEnum.ACCESS_GRAPH_SQL_ENABLED);
+    if (item) {
+      return JSON.parse(item);
+    }
+    return false;
   },
 };
 

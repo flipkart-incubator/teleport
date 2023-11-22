@@ -16,7 +16,7 @@ limitations under the License.
 
 import cfg from 'teleport/config';
 
-import { StoreNav, StoreUserContext } from './stores';
+import { StoreNav, StoreUserContext, StoreNotifications } from './stores';
 import * as types from './types';
 import AuditService from './services/audit';
 import RecordingsService from './services/recordings';
@@ -39,6 +39,7 @@ class TeleportContext implements types.Context {
   // stores
   storeNav = new StoreNav();
   storeUser = new StoreUserContext();
+  storeNotifications = new StoreNotifications();
 
   // services
   auditService = new AuditService();
@@ -59,6 +60,7 @@ class TeleportContext implements types.Context {
   isEnterprise = cfg.isEnterprise;
   isCloud = cfg.isCloud;
   automaticUpgradesEnabled = cfg.automaticUpgrades;
+  automaticUpgradesTargetVersion = cfg.automaticUpgradesTargetVersion;
   assistEnabled = cfg.assistEnabled;
   agentService = agentService;
 
@@ -89,6 +91,21 @@ class TeleportContext implements types.Context {
       const hasResource =
         await userService.checkUserHasAccessToRegisteredResource();
       localStorage.setOnboardDiscover({ hasResource });
+    }
+
+    if (user.acl.accessGraph.list) {
+      // If access graph is enabled, check what features are enabled and store them in local storage.
+      try {
+        const accessGraphFeatures =
+          await userService.fetchAccessGraphFeatures();
+
+        for (let key in accessGraphFeatures) {
+          window.localStorage.setItem(key, accessGraphFeatures[key]);
+        }
+      } catch (e) {
+        // If we fail to fetch access graph features, log the error and continue.
+        console.error('Failed to fetch access graph features', e);
+      }
     }
   }
 
@@ -134,6 +151,13 @@ class TeleportContext implements types.Context {
       return !cfg.isDashboard;
     }
 
+    function hasAccessMonitoringAccess() {
+      return (
+        userContext.getAuditQueryAccess().list ||
+        userContext.getSecurityReportAccess().list
+      );
+    }
+
     return {
       audit: userContext.getEventAccess().list,
       recordings: userContext.getSessionsAccess().list,
@@ -141,11 +165,19 @@ class TeleportContext implements types.Context {
       roles: userContext.getRoleAccess().list,
       trustedClusters: userContext.getTrustedClusterAccess().list,
       users: userContext.getUserAccess().list,
-      applications: userContext.getAppServerAccess().list,
-      kubernetes: userContext.getKubeServerAccess().list,
+      applications:
+        userContext.getAppServerAccess().list &&
+        userContext.getAppServerAccess().read,
+      kubernetes:
+        userContext.getKubeServerAccess().list &&
+        userContext.getKubeServerAccess().read,
       billing: userContext.getBillingAccess().list,
-      databases: userContext.getDatabaseServerAccess().list,
-      desktops: userContext.getDesktopAccess().list,
+      databases:
+        userContext.getDatabaseServerAccess().list &&
+        userContext.getDatabaseServerAccess().read,
+      desktops:
+        userContext.getDesktopAccess().list &&
+        userContext.getDesktopAccess().read,
       nodes: userContext.getNodeAccess().list,
       activeSessions: userContext.getActiveSessionsAccess().list,
       accessRequests: hasAccessRequestsAccess(),
@@ -163,7 +195,9 @@ class TeleportContext implements types.Context {
       newLocks:
         userContext.getLockAccess().create && userContext.getLockAccess().edit,
       assist: userContext.getAssistantAccess().list && this.assistEnabled,
+      accessMonitoring: hasAccessMonitoringAccess(),
       managementSection: hasManagementSectionAccess(),
+      accessGraph: userContext.getAccessGraphAccess().list,
     };
   }
 }
@@ -195,6 +229,8 @@ export const disabledFeatureFlags: types.FeatureFlags = {
   newLocks: false,
   assist: false,
   managementSection: false,
+  accessMonitoring: false,
+  accessGraph: false,
 };
 
 export default TeleportContext;

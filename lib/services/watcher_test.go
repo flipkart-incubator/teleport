@@ -523,7 +523,7 @@ func expectLockInForce(t *testing.T, expectedLock types.Lock, err error) {
 
 func resourceDiff(res1, res2 types.Resource) string {
 	return cmp.Diff(res1, res2,
-		cmpopts.IgnoreFields(types.Metadata{}, "ID"),
+		cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision"),
 		cmpopts.EquateEmpty())
 }
 
@@ -910,7 +910,7 @@ func TestNodeWatcherFallback(t *testing.T) {
 	// Add some servers.
 	nodes := make([]types.Server, 0, 5)
 	for i := 0; i < 5; i++ {
-		node := newNodeServer(t, fmt.Sprintf("node%d", i), "127.0.0.1:2023", i%2 == 0)
+		node := newNodeServer(t, fmt.Sprintf("node%d", i), fmt.Sprintf("hostname%d", i), "127.0.0.1:2023", i%2 == 0)
 		_, err = presence.UpsertNode(ctx, node)
 		require.NoError(t, err)
 		nodes = append(nodes, node)
@@ -962,7 +962,7 @@ func TestNodeWatcher(t *testing.T) {
 	// Add some node servers.
 	nodes := make([]types.Server, 0, 5)
 	for i := 0; i < 5; i++ {
-		node := newNodeServer(t, fmt.Sprintf("node%d", i), "127.0.0.1:2023", i%2 == 0)
+		node := newNodeServer(t, fmt.Sprintf("node%d", i), fmt.Sprintf("hostname%d", i), "127.0.0.1:2023", i%2 == 0)
 		_, err = presence.UpsertNode(ctx, node)
 		require.NoError(t, err)
 		nodes = append(nodes, node)
@@ -989,10 +989,11 @@ func TestNodeWatcher(t *testing.T) {
 	require.Empty(t, w.GetNodes(ctx, func(n services.Node) bool { return n.GetName() == nodes[0].GetName() }))
 }
 
-func newNodeServer(t *testing.T, name, addr string, tunnel bool) types.Server {
+func newNodeServer(t *testing.T, name, hostname, addr string, tunnel bool) types.Server {
 	s, err := types.NewServer(name, types.KindNode, types.ServerSpecV2{
 		Addr:      addr,
 		UseTunnel: tunnel,
+		Hostname:  hostname,
 	})
 	require.NoError(t, err)
 	return s
@@ -1276,7 +1277,7 @@ func TestOktaAssignmentWatcher(t *testing.T) {
 		require.Empty(t,
 			cmp.Diff(expected,
 				changeset,
-				cmpopts.IgnoreFields(types.Metadata{}, "ID")),
+				cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")),
 			"should be no differences in the changeset after adding the first assignment")
 	case <-w.Done():
 		t.Fatal("Watcher has unexpectedly exited.")
@@ -1300,7 +1301,7 @@ func TestOktaAssignmentWatcher(t *testing.T) {
 			cmp.Diff(
 				expected,
 				changeset,
-				cmpopts.IgnoreFields(types.Metadata{}, "ID")),
+				cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")),
 			"should be no difference in the changeset after adding the second assignment")
 	case <-w.Done():
 		t.Fatal("Watcher has unexpectedly exited.")
@@ -1324,7 +1325,7 @@ func TestOktaAssignmentWatcher(t *testing.T) {
 			cmp.Diff(
 				expected,
 				changeset,
-				cmpopts.IgnoreFields(types.Metadata{}, "ID")),
+				cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")),
 			"should be no difference in the changeset after update")
 	case <-w.Done():
 		t.Fatal("Watcher has unexpectedly exited.")
@@ -1346,7 +1347,7 @@ func TestOktaAssignmentWatcher(t *testing.T) {
 			cmp.Diff(
 				expected,
 				changeset,
-				cmpopts.IgnoreFields(types.Metadata{}, "ID")),
+				cmpopts.IgnoreFields(types.Metadata{}, "ID", "Revision")),
 			"should be no difference in the changeset after deleting the first assignment")
 	case <-w.Done():
 		t.Fatal("Watcher has unexpectedly exited.")

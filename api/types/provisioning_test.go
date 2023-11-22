@@ -705,6 +705,121 @@ func TestProvisionTokenV2_CheckAndSetDefaults(t *testing.T) {
 			expectedErr: &trace.BadParameterError{},
 		},
 		{
+			desc: "spacelift",
+			token: &ProvisionTokenV2{
+				Metadata: Metadata{
+					Name: "test",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Hostname: "example.app.spacelift.io",
+						Allow: []*ProvisionTokenSpecV2Spacelift_Rule{
+							{
+								SpaceID: "foo",
+							},
+						},
+					},
+				},
+			},
+			expected: &ProvisionTokenV2{
+				Kind:    "token",
+				Version: "v2",
+				Metadata: Metadata{
+					Name:      "test",
+					Namespace: "default",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Hostname: "example.app.spacelift.io",
+						Allow: []*ProvisionTokenSpecV2Spacelift_Rule{
+							{
+								SpaceID: "foo",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "spacelift empty allow rules",
+			token: &ProvisionTokenV2{
+				Metadata: Metadata{
+					Name: "test",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Hostname: "example.app.spacelift.io",
+						Allow:    []*ProvisionTokenSpecV2Spacelift_Rule{},
+					},
+				},
+			},
+			expectedErr: &trace.BadParameterError{},
+		},
+		{
+			desc: "spacelift rule missing fields",
+			token: &ProvisionTokenV2{
+				Metadata: Metadata{
+					Name: "test",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Hostname: "example.app.spacelift.io",
+						Allow:    []*ProvisionTokenSpecV2Spacelift_Rule{{}},
+					},
+				},
+			},
+			expectedErr: &trace.BadParameterError{},
+		},
+		{
+			desc: "spacelift missing hostname",
+			token: &ProvisionTokenV2{
+				Metadata: Metadata{
+					Name: "test",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Allow: []*ProvisionTokenSpecV2Spacelift_Rule{
+							{
+								SpaceID: "foo",
+							},
+						},
+					},
+				},
+			},
+			expectedErr: &trace.BadParameterError{},
+		},
+		{
+			desc: "spacelift incorrect hostname",
+			token: &ProvisionTokenV2{
+				Metadata: Metadata{
+					Name: "test",
+				},
+				Spec: ProvisionTokenSpecV2{
+					Roles:      []SystemRole{RoleNode},
+					JoinMethod: JoinMethodSpacelift,
+					Spacelift: &ProvisionTokenSpecV2Spacelift{
+						Hostname: "https://example.app.spacelift.io",
+						Allow: []*ProvisionTokenSpecV2Spacelift_Rule{
+							{
+								SpaceID: "foo",
+							},
+						},
+					},
+				},
+			},
+			expectedErr: &trace.BadParameterError{},
+		},
+		{
 			desc: "gcp method",
 			token: &ProvisionTokenV2{
 				Metadata: Metadata{
@@ -809,5 +924,22 @@ func TestProvisionTokenV2_GetSafeName(t *testing.T) {
 		require.NoError(t, err)
 		got := tok.GetSafeName()
 		require.Equal(t, "12345678", got)
+	})
+}
+
+func TestProvisionTokenV2_CaseInsensitiveRoles(t *testing.T) {
+	t.Parallel()
+	t.Run("via constructor", func(t *testing.T) {
+		tok, err := NewProvisionToken("token", SystemRoles{"nOde", "AuTh"}, time.Now())
+		require.NoError(t, err)
+		require.Equal(t, SystemRoles{RoleNode, RoleAuth}, tok.GetRoles())
+	})
+	t.Run("via struct", func(t *testing.T) {
+		tok := &ProvisionTokenV2{
+			Spec: ProvisionTokenSpecV2{
+				Roles: []SystemRole{"nOdE", "AuTh"},
+			},
+		}
+		require.Equal(t, SystemRoles{RoleNode, RoleAuth}, tok.GetRoles())
 	})
 }

@@ -42,12 +42,17 @@ func TestWithOwnersIneligibleStatusField(t *testing.T) {
 			Name:             "dne",
 			IneligibleStatus: accesslistv1.IneligibleStatus_INELIGIBLE_STATUS_USER_NOT_EXIST,
 		},
+		{
+			Name:             "unspecified",
+			IneligibleStatus: accesslistv1.IneligibleStatus_INELIGIBLE_STATUS_UNSPECIFIED,
+		},
 	}
 
 	owners := []accesslist.Owner{
 		{Name: "expired"},
 		{Name: "missing"},
 		{Name: "dne"},
+		{Name: "unspecified"},
 	}
 	al := &accesslist.AccessList{
 		Spec: accesslist.Spec{
@@ -71,6 +76,10 @@ func TestWithOwnersIneligibleStatusField(t *testing.T) {
 		{
 			Name:             "dne",
 			IneligibleStatus: accesslistv1.IneligibleStatus_INELIGIBLE_STATUS_USER_NOT_EXIST.String(),
+		},
+		{
+			Name:             "unspecified",
+			IneligibleStatus: "",
 		},
 	}))
 }
@@ -106,6 +115,20 @@ func TestFromProtoNils(t *testing.T) {
 
 	_, err = FromProto(accessList)
 	require.Error(t, err)
+
+	// Recurrence is nil
+	accessList = ToProto(newAccessList(t, "access-list"))
+	accessList.Spec.Audit.Recurrence = nil
+
+	_, err = FromProto(accessList)
+	require.NoError(t, err)
+
+	// Notifications is nil
+	accessList = ToProto(newAccessList(t, "access-list"))
+	accessList.Spec.Audit.Notifications = nil
+
+	_, err = FromProto(accessList)
+	require.NoError(t, err)
 
 	// MembershipRequires is nil
 	accessList = ToProto(newAccessList(t, "access-list"))
@@ -150,7 +173,6 @@ func newAccessList(t *testing.T, name string) *accesslist.AccessList {
 				},
 			},
 			Audit: accesslist.Audit{
-				Frequency:     time.Hour,
 				NextAuditDate: time.Now(),
 			},
 			MembershipRequires: accesslist.Requires{

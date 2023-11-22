@@ -22,7 +22,7 @@ We recommend familiarizing yourself with the following resources prior to review
 
 - [Teleport Architecture](https://goteleport.com/docs/architecture/overview/)
 - [Admin Guide](https://goteleport.com/docs/management/admin/)
-- [Running Teleport Enterprise in High Availability mode on AWS](https://goteleport.com/docs/deploy-a-cluster/deployments/aws-terraform/)
+- [Running Teleport Enterprise in High Availability mode on AWS](https://goteleport.com/docs/deploy-a-cluster/deployments/aws-ha-autoscale-cluster-terraform/)
 
 In order to spin up AWS resources using these Terraform examples, you need the following software:
 
@@ -106,6 +106,15 @@ export TF_VAR_email="support@example.com"
 
 # Setup grafana password for "admin" user. Grafana will be served on https://cluster.example.com:8443 after install
 export TF_VAR_grafana_pass="CHANGE_THIS_VALUE"
+
+# This value can be used to change the default authentication type used for the Teleport cluster.
+# See https://goteleport.com/docs/reference/authentication for more information.
+# This is useful for persisting a different default authentication type across AMI upgrades when you have a SAML, OIDC
+# or GitHub connector configured in DynamoDB. The default is "local".
+# Teleport Community Edition supports "local" or "github"
+# Teleport Enterprise Edition supports "local", "github", "oidc" or "saml"
+# Teleport Enterprise FIPS deployments have local authentication disabled, so should use "github", "oidc" or "saml"
+export TF_VAR_teleport_auth_type="local"
 
 # plan
 make plan

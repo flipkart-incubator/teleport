@@ -44,8 +44,10 @@ import (
 	"github.com/gravitational/teleport/api/breaker"
 	"github.com/gravitational/teleport/api/client/accesslist"
 	"github.com/gravitational/teleport/api/client/discoveryconfig"
+	"github.com/gravitational/teleport/api/client/externalcloudaudit"
 	"github.com/gravitational/teleport/api/client/okta"
 	"github.com/gravitational/teleport/api/client/proto"
+	"github.com/gravitational/teleport/api/client/secreport"
 	"github.com/gravitational/teleport/api/client/userloginstate"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/defaults"
@@ -54,6 +56,7 @@ import (
 	auditlogpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/auditlog/v1"
 	devicepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/devicetrust/v1"
 	discoveryconfigv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/discoveryconfig/v1"
+	externalcloudauditv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/externalcloudaudit/v1"
 	integrationpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/integration/v1"
 	kubeproto "github.com/gravitational/teleport/api/gen/proto/go/teleport/kube/v1"
 	loginrulepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/loginrule/v1"
@@ -61,6 +64,7 @@ import (
 	pluginspb "github.com/gravitational/teleport/api/gen/proto/go/teleport/plugins/v1"
 	resourceusagepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/resourceusage/v1"
 	samlidppb "github.com/gravitational/teleport/api/gen/proto/go/teleport/samlidp/v1"
+	secreportsv1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/secreports/v1"
 	trustpb "github.com/gravitational/teleport/api/gen/proto/go/teleport/trust/v1"
 	userloginstatev1 "github.com/gravitational/teleport/api/gen/proto/go/teleport/userloginstate/v1"
 	userpreferencespb "github.com/gravitational/teleport/api/gen/proto/go/userpreferences/v1"
@@ -516,10 +520,14 @@ func onceValue[T any](f func() T) func() T {
 // See https://github.com/gravitational/teleport/issues/30759
 // See https://github.com/open-telemetry/opentelemetry-go-contrib/issues/4226
 var otelStreamClientInterceptor = onceValue(func() grpc.StreamClientInterceptor {
+	//nolint:staticcheck // SA1019. There is a data race in the stats.Handler that is replacing
+	// the interceptor. See https://github.com/open-telemetry/opentelemetry-go-contrib/issues/4576.
 	return otelgrpc.StreamClientInterceptor()
 })
 
 var otelUnaryClientInterceptor = onceValue(func() grpc.UnaryClientInterceptor {
+	//nolint:staticcheck // SA1019. There is a data race in the stats.Handler that is replacing
+	// the interceptor. See https://github.com/open-telemetry/opentelemetry-go-contrib/issues/4576.
 	return otelgrpc.UnaryClientInterceptor()
 })
 
@@ -785,6 +793,11 @@ func (c *Client) LoginRuleClient() loginrulepb.LoginRuleServiceClient {
 	return loginrulepb.NewLoginRuleServiceClient(c.conn)
 }
 
+// SecReportsClient returns Security client that can be used to fetch security reports.
+func (c *Client) SecReportsClient() *secreport.Client {
+	return secreport.NewClient(secreportsv1.NewSecReportsServiceClient(c.conn))
+}
+
 // SAMLIdPClient returns an unadorned SAML IdP client, using the underlying
 // Auth gRPC connection.
 // Clients connecting to non-Enterprise clusters, or older Teleport versions,
@@ -792,6 +805,15 @@ func (c *Client) LoginRuleClient() loginrulepb.LoginRuleServiceClient {
 // return "not implemented" errors (as per the default gRPC behavior).
 func (c *Client) SAMLIdPClient() samlidppb.SAMLIdPServiceClient {
 	return samlidppb.NewSAMLIdPServiceClient(c.conn)
+}
+
+// ExternalCloudAuditClient returns an unadorned External Cloud Audit client,
+// using the underlying Auth gRPC connection.
+// Clients connecting to non-Enterprise clusters, or older Teleport versions,
+// still get a external audit client when calling this method, but all RPCs will
+// return "not implemented" errors (as per the default gRPC behavior).
+func (c *Client) ExternalCloudAuditClient() *externalcloudaudit.Client {
+	return externalcloudaudit.NewClient(externalcloudauditv1.NewExternalCloudAuditServiceClient(c.conn))
 }
 
 // TrustClient returns an unadorned Trust client, using the underlying
@@ -3905,6 +3927,22 @@ func (c *Client) ListIntegrations(ctx context.Context, pageSize int, nextKey str
 	}
 
 	return integrations, resp.GetNextKey(), nil
+}
+
+// ListAllIntegrations returns the list of all Integrations.
+func (c *Client) ListAllIntegrations(ctx context.Context) ([]types.Integration, error) {
+	var result []types.Integration
+	var nextKey string
+	for {
+		integrations, nextKey, err := c.ListIntegrations(ctx, 0, nextKey)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		result = append(result, integrations...)
+		if nextKey == "" {
+			return result, nil
+		}
+	}
 }
 
 // GetIntegration returns an Integration by its name.

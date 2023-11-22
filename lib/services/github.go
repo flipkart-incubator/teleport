@@ -26,6 +26,8 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 )
 
+// ErrRequiresEnterprise indicates that a feature requires
+// Teleport Enterprise.
 var ErrRequiresEnterprise = trace.AccessDenied("this feature requires Teleport Enterprise")
 
 // githubConnectorMutex is a mutex for the GitHub auth connector
@@ -164,6 +166,7 @@ func marshalGithubConnector(githubConnector types.GithubConnector, opts ...Marsh
 			// to prevent unexpected data races
 			copy := *githubConnector
 			copy.SetResourceID(0)
+			copy.SetRevision("")
 			githubConnector = &copy
 		}
 		return utils.FastMarshal(githubConnector)

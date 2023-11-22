@@ -19,6 +19,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -1192,17 +1193,6 @@ func (set RoleSet) GetAccessState(authPref types.AuthPreference) AccessState {
 }
 
 func (set RoleSet) getMFARequired(clusterRequireMFAType types.RequireMFAType) MFARequired {
-	// per-session MFA is overridden by hardware key PIV touch requirement.
-	// check if the auth pref or any roles have this option.
-	if clusterRequireMFAType == types.RequireMFAType_HARDWARE_KEY_TOUCH {
-		return MFARequiredNever
-	}
-	for _, role := range set {
-		if role.GetOptions().RequireMFAType == types.RequireMFAType_HARDWARE_KEY_TOUCH {
-			return MFARequiredNever
-		}
-	}
-
 	// MFA is always required according to the cluster auth pref.
 	if clusterRequireMFAType.IsSessionMFARequired() {
 		return MFARequiredAlways
@@ -1229,24 +1219,13 @@ func (set RoleSet) getMFARequired(clusterRequireMFAType types.RequireMFAType) MF
 }
 
 // PrivateKeyPolicy returns the enforced private key policy for this role set.
-func (set RoleSet) PrivateKeyPolicy(defaultPolicy keys.PrivateKeyPolicy) keys.PrivateKeyPolicy {
-	if defaultPolicy == keys.PrivateKeyPolicyHardwareKeyTouch {
-		// This is the strictest option so we can return now
-		return defaultPolicy
-	}
-
-	policy := defaultPolicy
+func (set RoleSet) PrivateKeyPolicy(authPreferencePolicy keys.PrivateKeyPolicy) (keys.PrivateKeyPolicy, error) {
+	policySet := []keys.PrivateKeyPolicy{authPreferencePolicy}
 	for _, role := range set {
-		switch rolePolicy := role.GetPrivateKeyPolicy(); rolePolicy {
-		case keys.PrivateKeyPolicyHardwareKey:
-			policy = rolePolicy
-		case keys.PrivateKeyPolicyHardwareKeyTouch:
-			// This is the strictest option so we can return now
-			return keys.PrivateKeyPolicyHardwareKeyTouch
-		}
+		policySet = append(policySet, role.GetPrivateKeyPolicy())
 	}
 
-	return policy
+	return keys.PolicyThatSatisfiesSet(policySet)
 }
 
 // AdjustSessionTTL will reduce the requested ttl to the lowest max allowed TTL
@@ -2870,7 +2849,43 @@ type checkAccessParams struct {
 	silent                bool
 }
 
-func (set RoleSet) checkAccessToRuleImpl(p checkAccessParams) error {
+type accessExplicitlyDenied struct {
+	inner error
+}
+
+// AccessExplicitlyDenied is an error type that indicates an AccessDenied error
+// where a deny rule matched and access is explicitly denied, in contrast to
+// cases where there is no matching deny or allow rule and access is only
+// implicitly denied.
+func AccessExplicitlyDenied(inner error) error {
+	return &accessExplicitlyDenied{inner}
+}
+
+// IsAccessExplicitlyDenied returns true if any of the errors in err's chain is
+// an AccessExplicitlyDenied error.
+func IsAccessExplicitlyDenied(err error) bool {
+	var target *accessExplicitlyDenied
+	return errors.As(err, &target)
+}
+
+func (a *accessExplicitlyDenied) Error() string {
+	return a.inner.Error()
+}
+
+func (a *accessExplicitlyDenied) Unwrap() error {
+	return a.inner
+}
+
+func (set RoleSet) checkAccessToRuleImpl(p checkAccessParams) (err error) {
+	// Every unknown error, which could be due to a bad role or an expression
+	// that can't parse, should be considered an explicit denial.
+	explicitDeny := true
+	defer func() {
+		if explicitDeny && err != nil {
+			err = AccessExplicitlyDenied(err)
+		}
+	}()
+
 	actionsParser, err := NewActionsParser(p.ctx)
 	if err != nil {
 		return trace.Wrap(err)
@@ -2916,6 +2931,10 @@ func (set RoleSet) checkAccessToRuleImpl(p checkAccessParams) error {
 		}).Infof("Access to %v %v in namespace %v denied to %v: no allow rule matched.",
 			p.verb, p.resource, p.namespace, set)
 	}
+
+	// At this point no deny rule has matched and there are no more unknown
+	// errors, so this is only an implicit denial.
+	explicitDeny = false
 	return trace.AccessDenied("access denied to perform action %q on %q", p.verb, p.resource)
 }
 
@@ -3051,6 +3070,19 @@ func (set RoleSet) GetAllowedPreviewAsRoles() []string {
 	return apiutils.Deduplicate(allowed)
 }
 
+// GetCreateDatabaseUserMode returns the create database user mode of the rule
+// set.
+func (set RoleSet) GetCreateDatabaseUserMode() types.CreateDatabaseUserMode {
+	var mode types.CreateDatabaseUserMode
+	for _, r := range set {
+		if roleMode := r.GetCreateDatabaseUserMode(); roleMode > mode {
+			mode = roleMode
+		}
+	}
+
+	return mode
+}
+
 // AccessState holds state for the present access attempt, including both
 // cluster settings and user state (MFA, device trust, etc).
 type AccessState struct {
@@ -3144,6 +3176,9 @@ func UnmarshalRole(bytes []byte, opts ...MarshalOption) (types.Role, error) {
 		if cfg.ID != 0 {
 			role.SetResourceID(cfg.ID)
 		}
+		if cfg.Revision != "" {
+			role.SetRevision(cfg.Revision)
+		}
 		if !cfg.Expires.IsZero() {
 			role.SetExpiry(cfg.Expires)
 		}
@@ -3171,6 +3206,7 @@ func MarshalRole(role types.Role, opts ...MarshalOption) ([]byte, error) {
 			// to prevent unexpected data races
 			copy := *role
 			copy.SetResourceID(0)
+			copy.SetRevision("")
 			role = &copy
 		}
 		return utils.FastMarshal(role)

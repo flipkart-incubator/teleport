@@ -158,6 +158,22 @@ func mustDecodeJSON[T any](t *testing.T, r io.Reader) T {
 	return out
 }
 
+func mustDecodeYAMLDocuments[T any](t *testing.T, r io.Reader, out *[]T) error {
+	decoder := yaml.NewDecoder(r)
+	for {
+		var entry T
+		if err := decoder.Decode(&entry); err != nil {
+			// Break when there are no more documents to decode
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+		*out = append(*out, entry)
+	}
+	return nil
+}
+
 func mustDecodeYAML[T any](t *testing.T, r io.Reader) T {
 	var out T
 	err := yaml.NewDecoder(r).Decode(&out)
@@ -193,7 +209,7 @@ func mustWriteIdentityFile(t *testing.T, fc *config.FileConfig, username string)
 
 type testServerOptions struct {
 	fileConfig      *config.FileConfig
-	fileDescriptors []servicecfg.FileDescriptor
+	fileDescriptors []*servicecfg.FileDescriptor
 	fakeClock       clockwork.FakeClock
 }
 
@@ -205,7 +221,7 @@ func withFileConfig(fc *config.FileConfig) testServerOptionFunc {
 	}
 }
 
-func withFileDescriptors(fds []servicecfg.FileDescriptor) testServerOptionFunc {
+func withFileDescriptors(fds []*servicecfg.FileDescriptor) testServerOptionFunc {
 	return func(options *testServerOptions) {
 		options.fileDescriptors = fds
 	}

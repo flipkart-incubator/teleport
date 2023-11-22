@@ -78,6 +78,13 @@ type Features struct {
 	AccessRequests AccessRequestsFeature
 	// CustomTheme holds the name of WebUI custom theme.
 	CustomTheme string
+
+	// IsTrialProduct is true if the cluster is in trial mode.
+	IsTrialProduct bool
+	// IsTeam is true if the cluster is a Teleport Team cluster.
+	IsTeamProduct bool
+	// AccessGraph enables the usage of access graph.
+	AccessGraph bool
 }
 
 // DeviceTrustFeature holds the Device Trust feature general and usage-based
@@ -122,6 +129,7 @@ func (f Features) ToProto() *proto.Features {
 		Assist:                  f.Assist,
 		FeatureHiding:           f.FeatureHiding,
 		CustomTheme:             f.CustomTheme,
+		AccessGraph:             f.AccessGraph,
 		DeviceTrust: &proto.DeviceTrustFeature{
 			Enabled:           f.DeviceTrust.Enabled,
 			DevicesUsageLimit: int32(f.DeviceTrust.DevicesUsageLimit),
@@ -138,8 +146,14 @@ type AccessResourcesGetter interface {
 	ListAccessLists(context.Context, int, string) ([]*accesslist.AccessList, string, error)
 	ListResources(ctx context.Context, req proto.ListResourcesRequest) (*types.ListResourcesResponse, error)
 
+	ListAccessListMembers(ctx context.Context, accessList string, pageSize int, pageToken string) (members []*accesslist.AccessListMember, nextToken string, err error)
+	GetAccessListMember(ctx context.Context, accessList string, memberName string) (*accesslist.AccessListMember, error)
+
 	GetUser(userName string, withSecrets bool) (types.User, error)
 	GetRole(ctx context.Context, name string) (types.Role, error)
+
+	GetLock(ctx context.Context, name string) (types.Lock, error)
+	GetLocks(ctx context.Context, inForceOnly bool, targets ...types.LockTarget) ([]types.Lock, error)
 }
 
 // Modules defines interface that external libraries can implement customizing
@@ -163,6 +177,8 @@ type Modules interface {
 	EnableRecoveryCodes()
 	// EnablePlugins enables the hosted plugins runtime
 	EnablePlugins()
+	// EnableAccessGraph enables the usage of access graph.
+	EnableAccessGraph()
 }
 
 const (
@@ -272,6 +288,10 @@ func (p *defaultModules) EnableRecoveryCodes() {
 // This is a noop since OSS teleport does not support hosted plugins
 func (p *defaultModules) EnablePlugins() {
 }
+
+// EnableAccessGraph enables the usage of access graph.
+// This is a noop since OSS teleport does not support access graph.
+func (p *defaultModules) EnableAccessGraph() {}
 
 var (
 	mutex   sync.Mutex

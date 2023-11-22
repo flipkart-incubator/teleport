@@ -44,6 +44,7 @@ import (
 	"github.com/gravitational/teleport/lib/srv/forward"
 	"github.com/gravitational/teleport/lib/teleagent"
 	"github.com/gravitational/teleport/lib/utils"
+	"github.com/gravitational/teleport/lib/utils/oidc"
 	proxyutils "github.com/gravitational/teleport/lib/utils/proxy"
 )
 
@@ -119,7 +120,7 @@ func newLocalSite(srv *server, domainName string, authServers []string, opts ...
 		// certificate cache is created in each site (instead of creating it in
 		// reversetunnel.server and passing it along) so that the host certificate
 		// is signed by the correct certificate authority.
-		certificateCache, err := newHostCertificateCache(srv.Config.KeyGen, srv.localAuthClient)
+		certificateCache, err := newHostCertificateCache(srv.localAuthClient)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -372,29 +373,30 @@ func (s *localSite) dialAndForward(params reversetunnelclient.DialParams) (_ net
 	// server does not need to close, it will close and release all resources
 	// once conn is closed.
 	serverConfig := forward.ServerConfig{
-		AuthClient:      s.client,
-		UserAgent:       userAgent,
-		IsAgentlessNode: isAgentlessNode(params),
-		AgentlessSigner: params.AgentlessSigner,
-		TargetConn:      targetConn,
-		SrcAddr:         params.From,
-		DstAddr:         params.To,
-		HostCertificate: hostCertificate,
-		Ciphers:         s.srv.Config.Ciphers,
-		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
-		MACAlgorithms:   s.srv.Config.MACAlgorithms,
-		DataDir:         s.srv.Config.DataDir,
-		Address:         params.Address,
-		UseTunnel:       useTunnel,
-		HostUUID:        s.srv.ID,
-		Emitter:         s.srv.Config.Emitter,
-		ParentContext:   s.srv.Context,
-		LockWatcher:     s.srv.LockWatcher,
-		TargetID:        params.ServerID,
-		TargetAddr:      params.To.String(),
-		TargetHostname:  params.Address,
-		TargetServer:    params.TargetServer,
-		Clock:           s.clock,
+		LocalAuthClient:          s.client,
+		TargetClusterAccessPoint: s.accessPoint,
+		UserAgent:                userAgent,
+		IsAgentlessNode:          isAgentlessNode(params),
+		AgentlessSigner:          params.AgentlessSigner,
+		TargetConn:               targetConn,
+		SrcAddr:                  params.From,
+		DstAddr:                  params.To,
+		HostCertificate:          hostCertificate,
+		Ciphers:                  s.srv.Config.Ciphers,
+		KEXAlgorithms:            s.srv.Config.KEXAlgorithms,
+		MACAlgorithms:            s.srv.Config.MACAlgorithms,
+		DataDir:                  s.srv.Config.DataDir,
+		Address:                  params.Address,
+		UseTunnel:                useTunnel,
+		HostUUID:                 s.srv.ID,
+		Emitter:                  s.srv.Config.Emitter,
+		ParentContext:            s.srv.Context,
+		LockWatcher:              s.srv.LockWatcher,
+		TargetID:                 params.ServerID,
+		TargetAddr:               params.To.String(),
+		TargetHostname:           params.Address,
+		TargetServer:             params.TargetServer,
+		Clock:                    s.clock,
 	}
 	// Ensure the hostname is set correctly if we have details of the target
 	if params.TargetServer != nil {
@@ -505,7 +507,7 @@ func (s *localSite) setupTunnelForOpenSSHEICENode(ctx context.Context, targetSer
 		return nil, trace.BadParameter("missing aws cloud metadata")
 	}
 
-	issuer, err := awsoidc.IssuerForCluster(ctx, s.accessPoint)
+	issuer, err := oidc.IssuerForCluster(ctx, s.accessPoint)
 	if err != nil {
 		return nil, trace.BadParameter("failed to get issuer %v", err)
 	}
@@ -537,9 +539,10 @@ func (s *localSite) setupTunnelForOpenSSHEICENode(ctx context.Context, targetSer
 	}
 
 	openTunnelResp, err := awsoidc.OpenTunnelEC2(ctx, openTunnelClt, awsoidc.OpenTunnelEC2Request{
-		Region:     awsInfo.Region,
-		VPCID:      awsInfo.VPCID,
-		EC2Address: targetServer.GetAddr(),
+		Region:        awsInfo.Region,
+		VPCID:         awsInfo.VPCID,
+		EC2InstanceID: awsInfo.InstanceID,
+		EC2Address:    targetServer.GetAddr(),
 	})
 	if err != nil {
 		return nil, trace.BadParameter("failed to open AWS EC2 Instance Connect Endpoint tunnel: %v", err)

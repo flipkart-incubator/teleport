@@ -46,9 +46,10 @@ func (u *UserLoginEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventRequ
 	return prehogv1a.SubmitEventRequest{
 		Event: &prehogv1a.SubmitEventRequest_UserLogin{
 			UserLogin: &prehogv1a.UserLoginEvent{
-				UserName:      a.AnonymizeString(u.UserName),
-				ConnectorType: u.ConnectorType,
-				DeviceId:      deviceID,
+				UserName:                 a.AnonymizeString(u.UserName),
+				ConnectorType:            u.ConnectorType,
+				DeviceId:                 deviceID,
+				RequiredPrivateKeyPolicy: u.RequiredPrivateKeyPolicy,
 			},
 		},
 	}
@@ -97,6 +98,14 @@ func (u *SessionStartEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventR
 			DbType:     u.Database.DbType,
 			DbProtocol: u.Database.DbProtocol,
 			DbOrigin:   u.Database.DbOrigin,
+		}
+	}
+	if u.Desktop != nil {
+		sessionStart.Desktop = &prehogv1a.SessionStartDesktopMetadata{
+			DesktopType:       u.Desktop.DesktopType,
+			Origin:            u.Desktop.Origin,
+			WindowsDomain:     a.AnonymizeString(u.Desktop.WindowsDomain),
+			AllowUserCreation: u.Desktop.AllowUserCreation,
 		}
 	}
 	return prehogv1a.SubmitEventRequest{
@@ -449,13 +458,14 @@ func (u *UserCertificateIssuedEvent) Anonymize(a utils.Anonymizer) prehogv1a.Sub
 	return prehogv1a.SubmitEventRequest{
 		Event: &prehogv1a.SubmitEventRequest_UserCertificateIssuedEvent{
 			UserCertificateIssuedEvent: &prehogv1a.UserCertificateIssuedEvent{
-				UserName:        a.AnonymizeString(u.UserName),
-				Ttl:             u.Ttl,
-				IsBot:           u.IsBot,
-				UsageDatabase:   u.UsageDatabase,
-				UsageApp:        u.UsageApp,
-				UsageKubernetes: u.UsageKubernetes,
-				UsageDesktop:    u.UsageDesktop,
+				UserName:         a.AnonymizeString(u.UserName),
+				Ttl:              u.Ttl,
+				IsBot:            u.IsBot,
+				UsageDatabase:    u.UsageDatabase,
+				UsageApp:         u.UsageApp,
+				UsageKubernetes:  u.UsageKubernetes,
+				UsageDesktop:     u.UsageDesktop,
+				PrivateKeyPolicy: u.PrivateKeyPolicy,
 			},
 		},
 	}
@@ -833,6 +843,54 @@ func (e *LicenseLimitEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventR
 	}
 }
 
+// DesktopDirectoryShareEvent is emitted when a user shares a directory
+// in a Windows desktop session.
+type DesktopDirectoryShareEvent prehogv1a.DesktopDirectoryShareEvent
+
+func (e *DesktopDirectoryShareEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventRequest {
+	return prehogv1a.SubmitEventRequest{
+		Event: &prehogv1a.SubmitEventRequest_DesktopDirectoryShare{
+			DesktopDirectoryShare: &prehogv1a.DesktopDirectoryShareEvent{
+				Desktop:       a.AnonymizeString(e.Desktop),
+				UserName:      a.AnonymizeString(e.UserName),
+				DirectoryName: a.AnonymizeString(e.DirectoryName),
+			},
+		},
+	}
+}
+
+// DesktopClipboardEvent is emitted when a user transfers data
+// between their local clipboard and the clipboard on a remote Windows
+// desktop.
+type DesktopClipboardEvent prehogv1a.DesktopClipboardEvent
+
+func (e *DesktopClipboardEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventRequest {
+	return prehogv1a.SubmitEventRequest{
+		Event: &prehogv1a.SubmitEventRequest_DesktopClipboardTransfer{
+			DesktopClipboardTransfer: &prehogv1a.DesktopClipboardEvent{
+				Desktop:  a.AnonymizeString(e.Desktop),
+				UserName: a.AnonymizeString(e.UserName),
+			},
+		},
+	}
+}
+
+type TagExecuteQueryEvent prehogv1a.TAGExecuteQueryEvent
+
+// Anonymize anonymizes the event.
+func (e *TagExecuteQueryEvent) Anonymize(a utils.Anonymizer) prehogv1a.SubmitEventRequest {
+	return prehogv1a.SubmitEventRequest{
+		Event: &prehogv1a.SubmitEventRequest_TagExecuteQuery{
+			TagExecuteQuery: &prehogv1a.TAGExecuteQueryEvent{
+				UserName:   a.AnonymizeString(e.UserName),
+				TotalEdges: e.TotalEdges,
+				TotalNodes: e.TotalNodes,
+				IsSuccess:  e.IsSuccess,
+			},
+		},
+	}
+}
+
 // ConvertUsageEvent converts a usage event from an API object into an
 // anonymizable event. All events that can be submitted externally via the Auth
 // API need to be defined here.
@@ -1051,7 +1109,7 @@ func ConvertUsageEvent(event *usageeventsv1.UsageEventOneOf, userMD UserMetadata
 
 		return ret, nil
 	case *usageeventsv1.UsageEventOneOf_UiDiscoverDeployEice:
-		ret := &UIDiscoverAutoDiscoveredResourcesEvent{
+		ret := &UIDiscoverDeployEICEEvent{
 			Metadata: discoverMetadataToPrehog(e.UiDiscoverDeployEice.Metadata, userMD),
 			Resource: discoverResourceToPrehog(e.UiDiscoverDeployEice.Resource),
 			Status:   discoverStatusToPrehog(e.UiDiscoverDeployEice.Status),
@@ -1062,7 +1120,7 @@ func ConvertUsageEvent(event *usageeventsv1.UsageEventOneOf, userMD UserMetadata
 
 		return ret, nil
 	case *usageeventsv1.UsageEventOneOf_UiDiscoverCreateNode:
-		ret := &UIDiscoverAutoDiscoveredResourcesEvent{
+		ret := &UIDiscoverCreateNodeEvent{
 			Metadata: discoverMetadataToPrehog(e.UiDiscoverCreateNode.Metadata, userMD),
 			Resource: discoverResourceToPrehog(e.UiDiscoverCreateNode.Resource),
 			Status:   discoverStatusToPrehog(e.UiDiscoverCreateNode.Status),
@@ -1232,6 +1290,14 @@ func ConvertUsageEvent(event *usageeventsv1.UsageEventOneOf, userMD UserMetadata
 			UserName:           userMD.Username,
 			CountRolesGranted:  e.AccessListGrantsToUser.CountRolesGranted,
 			CountTraitsGranted: e.AccessListGrantsToUser.CountTraitsGranted,
+		}
+		return ret, nil
+	case *usageeventsv1.UsageEventOneOf_TagExecuteQuery:
+		ret := &TagExecuteQueryEvent{
+			UserName:   userMD.Username,
+			TotalEdges: e.TagExecuteQuery.TotalEdges,
+			TotalNodes: e.TagExecuteQuery.TotalNodes,
+			IsSuccess:  e.TagExecuteQuery.IsSuccess,
 		}
 		return ret, nil
 	default:

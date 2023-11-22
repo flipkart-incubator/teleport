@@ -69,6 +69,7 @@ export interface MainProps {
   billingBanners?: ReactNode[];
   Questionnaire?: (props: QuestionnaireProps) => React.ReactElement;
   navigationProps?: NavigationProps;
+  inviteCollaboratorsFeedback?: ReactNode;
 }
 
 export function Main(props: MainProps) {
@@ -194,6 +195,7 @@ export function Main(props: MainProps) {
           />
         </Dialog>
       )}
+      {props.inviteCollaboratorsFeedback}
     </FeaturesContextProvider>
   );
 }
@@ -262,7 +264,10 @@ function FeatureRoutes({ lockedFeatures }: { lockedFeatures: LockedFeatures }) {
 }
 
 export const ContentMinWidth = styled.div`
-  min-width: calc(1250px - var(--sidebar-width));
+  min-width: 1250px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 `;
 
 export const HorizontalSplit = styled.div`

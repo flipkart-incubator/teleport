@@ -35,6 +35,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/gravitational/teleport/api/breaker"
+	apiclient "github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/constants"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
@@ -177,29 +178,6 @@ func CloseAgent(teleAgent *teleagent.AgentServer, socketDirPath string) error {
 	}
 
 	return nil
-}
-
-// GetLocalIP gets the non-loopback IP address of this host.
-func GetLocalIP() (string, error) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "", trace.Wrap(err)
-	}
-	for _, addr := range addrs {
-		var ip net.IP
-		switch v := addr.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		default:
-			continue
-		}
-		if !ip.IsLoopback() && ip.IsPrivate() {
-			return ip.String(), nil
-		}
-	}
-	return "", trace.NotFound("No non-loopback local IP address found")
 }
 
 func MustCreateUserIdentityFile(t *testing.T, tc *TeleInstance, username string, ttl time.Duration) string {
@@ -473,7 +451,7 @@ func MustCreateListener(t *testing.T) net.Listener {
 	return listener
 }
 
-func FindNodeWithLabel(t *testing.T, ctx context.Context, cl services.ResourceLister, key, value string) func() bool {
+func FindNodeWithLabel(t *testing.T, ctx context.Context, cl apiclient.ListResourcesClient, key, value string) func() bool {
 	t.Helper()
 	return func() bool {
 		servers, err := cl.ListResources(ctx, proto.ListResourcesRequest{

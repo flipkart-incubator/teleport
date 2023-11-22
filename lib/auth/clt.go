@@ -27,6 +27,7 @@ import (
 
 	"github.com/gravitational/teleport/api/client"
 	"github.com/gravitational/teleport/api/client/proto"
+	"github.com/gravitational/teleport/api/client/secreport"
 	apidefaults "github.com/gravitational/teleport/api/defaults"
 	assistpb "github.com/gravitational/teleport/api/gen/proto/go/assist/v1"
 	devicepb "github.com/gravitational/teleport/api/gen/proto/go/teleport/devicetrust/v1"
@@ -37,6 +38,7 @@ import (
 	userpreferencesv1 "github.com/gravitational/teleport/api/gen/proto/go/userpreferences/v1"
 	"github.com/gravitational/teleport/api/types"
 	apievents "github.com/gravitational/teleport/api/types/events"
+	accessgraphv1 "github.com/gravitational/teleport/gen/proto/go/accessgraph/v1alpha"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
@@ -85,6 +87,8 @@ var _ ClientI = &Client{}
 // functionality that hasn't been ported to the new client yet.
 func NewClient(cfg client.Config, params ...roundtrip.ClientParam) (*Client, error) {
 	cfg.DialInBackground = true
+
+	cfg.CircuitBreakerConfig.TrippedErrorMessage = "Unable to communicate with the Teleport Auth Service"
 
 	if err := cfg.CheckAndSetDefaults(); err != nil {
 		return nil, trace.Wrap(err)
@@ -437,12 +441,30 @@ func (c *Client) OktaClient() services.Okta {
 	return c.APIClient.OktaClient()
 }
 
+// SecReportsClient returns a client for security reports.
+func (c *Client) SecReportsClient() *secreport.Client {
+	return c.APIClient.SecReportsClient()
+}
+
 func (c *Client) AccessListClient() services.AccessLists {
 	return c.APIClient.AccessListClient()
 }
 
+func (c *Client) ExternalCloudAuditClient() services.ExternalCloudAudits {
+	return c.APIClient.ExternalCloudAuditClient()
+}
+
 func (c *Client) UserLoginStateClient() services.UserLoginStates {
 	return c.APIClient.UserLoginStateClient()
+}
+
+func (c *Client) AccessGraphClient() accessgraphv1.AccessGraphServiceClient {
+	return accessgraphv1.NewAccessGraphServiceClient(c.APIClient.GetConnection())
+}
+
+// DiscoveryConfigClient returns a client for managing the DiscoveryConfig resource.
+func (c *Client) DiscoveryConfigClient() services.DiscoveryConfigs {
+	return c.APIClient.DiscoveryConfigClient()
 }
 
 // WebService implements features used by Web UI clients
@@ -715,6 +737,9 @@ type ClientI interface {
 	// EmbeddingClient returns a client to the Embedding gRPC service.
 	EmbeddingClient() assistpb.AssistEmbeddingServiceClient
 
+	// AccessGraphClient returns a client to the Access Graph gRPC service.
+	AccessGraphClient() accessgraphv1.AccessGraphServiceClient
+
 	// NewKeepAliver returns a new instance of keep aliver
 	NewKeepAliver(ctx context.Context) (types.KeepAliver, error)
 
@@ -839,17 +864,35 @@ type ClientI interface {
 	// (as per the default gRPC behavior).
 	AccessListClient() services.AccessLists
 
+	// SecReportsClient returns a client for security reports.
+	// Clients connecting to  older Teleport versions, still get an access list client
+	// when calling this method, but all RPCs will return "not implemented" errors
+	// (as per the default gRPC behavior).
+	SecReportsClient() *secreport.Client
+
 	// UserLoginStateClient returns a user login state client.
 	// Clients connecting to older Teleport versions still get a user login state client
 	// when calling this method, but all RPCs will return "not implemented" errors
 	// (as per the default gRPC behavior).
 	UserLoginStateClient() services.UserLoginStates
 
+	// DiscoveryConfigClient returns a DiscoveryConfig client.
+	// Clients connecting to older Teleport versions, still get an DiscoveryConfig client
+	// when calling this method, but all RPCs will return "not implemented" errors
+	// (as per the default gRPC behavior).
+	DiscoveryConfigClient() services.DiscoveryConfigs
+
 	// ResourceUsageClient returns a resource usage service client.
 	// Clients connecting to non-Enterprise clusters, or older Teleport versions,
 	// still get a client when calling this method, but all RPCs will return
 	// "not implemented" errors (as per the default gRPC behavior).
 	ResourceUsageClient() resourceusagepb.ResourceUsageServiceClient
+
+	// ExternalCloudAuditClient returns an external cloud audit client.
+	// Clients connecting to non-Enterprise clusters, or older Teleport versions,
+	// still get a client when calling this method, but all RPCs will return
+	// "not implemented" errors (as per the default gRPC behavior).
+	ExternalCloudAuditClient() services.ExternalCloudAudits
 
 	// CloneHTTPClient creates a new HTTP client with the same configuration.
 	CloneHTTPClient(params ...roundtrip.ClientParam) (*HTTPClient, error)

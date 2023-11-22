@@ -25,8 +25,10 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/require"
 
+	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/api/types/accesslist"
 	"github.com/gravitational/teleport/api/types/header"
+	"github.com/gravitational/teleport/api/types/trait"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
 )
@@ -59,7 +61,6 @@ func TestAccessListUnmarshal(t *testing.T) {
 				},
 			},
 			Audit: accesslist.Audit{
-				Frequency:     time.Hour,
 				NextAuditDate: time.Date(2023, 02, 02, 0, 0, 0, 0, time.UTC),
 			},
 			MembershipRequires: accesslist.Requires{
@@ -113,7 +114,6 @@ func TestAccessListMarshal(t *testing.T) {
 				},
 			},
 			Audit: accesslist.Audit{
-				Frequency:     time.Hour,
 				NextAuditDate: time.Date(2023, 02, 02, 0, 0, 0, 0, time.UTC),
 			},
 			MembershipRequires: accesslist.Requires{
@@ -266,13 +266,14 @@ func TestIsAccessListOwner(t *testing.T) {
 	}
 }
 
-// testMembersGetter implements AccessListMembersGetter for testing.
-type testMembersGetter struct {
+// testMembersAndLockGetter implements AccessListMembersGetter and LockGetter for testing.
+type testMembersAndLockGetter struct {
 	members map[string]map[string]*accesslist.AccessListMember
+	locks   map[string]types.Lock
 }
 
 // ListAccessListMembers returns a paginated list of all access list members.
-func (t *testMembersGetter) ListAccessListMembers(ctx context.Context, accessList string, _ int, _ string) (members []*accesslist.AccessListMember, nextToken string, err error) {
+func (t *testMembersAndLockGetter) ListAccessListMembers(ctx context.Context, accessList string, _ int, _ string) (members []*accesslist.AccessListMember, nextToken string, err error) {
 	for _, member := range t.members[accessList] {
 		members = append(members, member)
 	}
@@ -280,7 +281,7 @@ func (t *testMembersGetter) ListAccessListMembers(ctx context.Context, accessLis
 }
 
 // GetAccessListMember returns the specified access list member resource.
-func (t *testMembersGetter) GetAccessListMember(ctx context.Context, accessList string, memberName string) (*accesslist.AccessListMember, error) {
+func (t *testMembersAndLockGetter) GetAccessListMember(ctx context.Context, accessList string, memberName string) (*accesslist.AccessListMember, error) {
 	members, ok := t.members[accessList]
 	if !ok {
 		return nil, trace.NotFound("not found")
@@ -294,12 +295,36 @@ func (t *testMembersGetter) GetAccessListMember(ctx context.Context, accessList 
 	return member, nil
 }
 
-func TestIsAccessListMember(t *testing.T) {
+// GetLock gets a lock by name.
+func (t *testMembersAndLockGetter) GetLock(_ context.Context, name string) (types.Lock, error) {
+	if t.locks == nil {
+		return nil, trace.NotFound("not found")
+	}
+
+	lock, ok := t.locks[name]
+	if !ok {
+		return nil, trace.NotFound("not found")
+	}
+
+	return lock, nil
+}
+
+// GetLocks gets all/in-force locks that match at least one of the targets when specified.
+func (t *testMembersAndLockGetter) GetLocks(ctx context.Context, inForceOnly bool, targets ...types.LockTarget) ([]types.Lock, error) {
+	locks := make([]types.Lock, 0, len(t.locks))
+	for _, lock := range t.locks {
+		locks = append(locks, lock)
+	}
+	return locks, nil
+}
+
+func TestIsAccessListMemberChecker(t *testing.T) {
 	tests := []struct {
 		name             string
 		identity         tlsca.Identity
 		memberCtx        context.Context
 		currentTime      time.Time
+		locks            map[string]types.Lock
 		errAssertionFunc require.ErrorAssertionFunc
 	}{
 		{
@@ -314,6 +339,24 @@ func TestIsAccessListMember(t *testing.T) {
 			},
 			currentTime:      time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC),
 			errAssertionFunc: require.NoError,
+		},
+		{
+			name: "is locked member",
+			identity: tlsca.Identity{
+				Username: member1,
+				Groups:   []string{"mrole1", "mrole2"},
+				Traits: map[string][]string{
+					"mtrait1": {"mvalue1", "mvalue2"},
+					"mtrait2": {"mvalue3", "mvalue4"},
+				},
+			},
+			locks: map[string]types.Lock{
+				"test-lock": newUserLock(t, "test-lock", member1),
+			},
+			currentTime: time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC),
+			errAssertionFunc: func(t require.TestingT, err error, i ...interface{}) {
+				require.ErrorIs(t, err, trace.AccessDenied("user %s is currently locked", member1))
+			},
 		},
 		{
 			name: "is not a member",
@@ -408,11 +451,168 @@ func TestIsAccessListMember(t *testing.T) {
 				}
 				memberMap[accessListName][member.Spec.Name] = member
 			}
-			getter := &testMembersGetter{members: memberMap}
+			getter := &testMembersAndLockGetter{members: memberMap, locks: test.locks}
 
-			test.errAssertionFunc(t, IsAccessListMember(ctx, test.identity, clockwork.NewFakeClockAt(test.currentTime), accessList, getter))
+			checker := NewAccessListMembershipChecker(clockwork.NewFakeClockAt(test.currentTime), getter, getter)
+			test.errAssertionFunc(t, checker.IsAccessListMember(ctx, test.identity, accessList))
 		})
 	}
+}
+
+func TestSelectNextReviewDate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		frequency         accesslist.ReviewFrequency
+		dayOfMonth        accesslist.ReviewDayOfMonth
+		currentReviewDate time.Time
+		expected          time.Time
+	}{
+		{
+			name:              "one month, first day",
+			frequency:         accesslist.OneMonth,
+			dayOfMonth:        accesslist.FirstDayOfMonth,
+			currentReviewDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+			expected:          time.Date(2023, 2, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:              "one month, fifteenth day",
+			frequency:         accesslist.OneMonth,
+			dayOfMonth:        accesslist.FifteenthDayOfMonth,
+			currentReviewDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+			expected:          time.Date(2023, 2, 15, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:              "one month, last day",
+			frequency:         accesslist.OneMonth,
+			dayOfMonth:        accesslist.LastDayOfMonth,
+			currentReviewDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+			expected:          time.Date(2023, 2, 28, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:              "six months, last day",
+			frequency:         accesslist.SixMonths,
+			dayOfMonth:        accesslist.LastDayOfMonth,
+			currentReviewDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+			expected:          time.Date(2023, 7, 31, 0, 0, 0, 0, time.UTC),
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			accessList := newAccessList(t)
+			accessList.Spec.Audit.NextAuditDate = test.currentReviewDate
+			accessList.Spec.Audit.Recurrence = accesslist.Recurrence{
+				Frequency:  test.frequency,
+				DayOfMonth: test.dayOfMonth,
+			}
+			require.Equal(t, test.expected, SelectNextReviewDate(accessList))
+		})
+	}
+}
+
+// TestAccessListReviewUnmarshal verifies an access list review resource can be unmarshaled.
+func TestAccessListReviewUnmarshal(t *testing.T) {
+	expected, err := accesslist.NewReview(
+		header.Metadata{
+			Name: "test-access-list-review",
+		},
+		accesslist.ReviewSpec{
+			AccessList: "access-list",
+			Reviewers: []string{
+				"user1",
+				"user2",
+			},
+			ReviewDate: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
+			Notes:      "Some notes",
+			Changes: accesslist.ReviewChanges{
+				MembershipRequirementsChanged: &accesslist.Requires{
+					Roles: []string{
+						"role1",
+						"role2",
+					},
+					Traits: trait.Traits{
+						"trait1": []string{
+							"value1",
+							"value2",
+						},
+						"trait2": []string{
+							"value1",
+							"value2",
+						},
+					},
+				},
+				RemovedMembers: []string{
+					"member1",
+					"member2",
+				},
+				ReviewFrequencyChanged:  accesslist.ThreeMonths,
+				ReviewDayOfMonthChanged: accesslist.FifteenthDayOfMonth,
+			},
+		},
+	)
+	require.NoError(t, err)
+	data, err := utils.ToJSON([]byte(accessListReviewYAML))
+	require.NoError(t, err)
+	actual, err := UnmarshalAccessListReview(data)
+	require.NoError(t, err)
+	require.Equal(t, expected, actual)
+}
+
+// TestAccessListReviewMarshal verifies a marshaled access list review resource can be unmarshaled back.
+func TestAccessListReviewMarshal(t *testing.T) {
+	expected, err := accesslist.NewAccessList(
+		header.Metadata{
+			Name: "test-access-list-review",
+		},
+		accesslist.Spec{
+			Title:       "title",
+			Description: "test access list",
+			Owners: []accesslist.Owner{
+				{
+					Name:        "test-user1",
+					Description: "test user 1",
+				},
+				{
+					Name:        "test-user2",
+					Description: "test user 2",
+				},
+			},
+			Audit: accesslist.Audit{
+				NextAuditDate: time.Date(2023, 02, 02, 0, 0, 0, 0, time.UTC),
+			},
+			MembershipRequires: accesslist.Requires{
+				Roles: []string{"mrole1", "mrole2"},
+				Traits: map[string][]string{
+					"mtrait1": {"mvalue1", "mvalue2"},
+					"mtrait2": {"mvalue3", "mvalue4"},
+				},
+			},
+			OwnershipRequires: accesslist.Requires{
+				Roles: []string{"orole1", "orole2"},
+				Traits: map[string][]string{
+					"otrait1": {"ovalue1", "ovalue2"},
+					"otrait2": {"ovalue3", "ovalue4"},
+				},
+			},
+			Grants: accesslist.Grants{
+				Roles: []string{"grole1", "grole2"},
+				Traits: map[string][]string{
+					"gtrait1": {"gvalue1", "gvalue2"},
+					"gtrait2": {"gvalue3", "gvalue4"},
+				},
+			},
+		},
+	)
+	require.NoError(t, err)
+	data, err := MarshalAccessList(expected)
+	require.NoError(t, err)
+	actual, err := UnmarshalAccessList(data)
+	require.NoError(t, err)
+	require.Equal(t, expected, actual)
 }
 
 func newAccessList(t *testing.T) *accesslist.AccessList {
@@ -436,8 +636,11 @@ func newAccessList(t *testing.T) *accesslist.AccessList {
 				},
 			},
 			Audit: accesslist.Audit{
-				Frequency:     time.Hour,
 				NextAuditDate: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+				Recurrence: accesslist.Recurrence{
+					Frequency:  accesslist.ThreeMonths,
+					DayOfMonth: accesslist.FifteenthDayOfMonth,
+				},
 			},
 			MembershipRequires: accesslist.Requires{
 				Roles: []string{"mrole1", "mrole2"},
@@ -572,3 +775,47 @@ spec:
   reason: "because"
   added_by: "test-user1"
 `
+
+var accessListReviewYAML = `---
+kind: access_list_review
+version: v1
+metadata:
+  name: test-access-list-review
+spec:
+  access_list: access-list
+  reviewers:
+  - user1
+  - user2
+  review_date: 2023-01-01T00:00:00Z
+  notes: "Some notes"
+  changes:
+    membership_requirements_changed:
+      roles:
+      - role1
+      - role2
+      traits:
+        trait1:
+        - value1
+        - value2
+        trait2:
+        - value1
+        - value2
+    removed_members:
+    - member1
+    - member2
+    review_frequency_changed: 3 months
+    review_day_of_month_changed: "15"
+`
+
+func newUserLock(t *testing.T, name, user string) types.Lock {
+	t.Helper()
+
+	lock, err := types.NewLock(name, types.LockSpecV2{
+		Target: types.LockTarget{
+			User: user,
+		},
+	})
+	require.NoError(t, err)
+
+	return lock
+}
