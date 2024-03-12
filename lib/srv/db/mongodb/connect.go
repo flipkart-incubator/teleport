@@ -146,6 +146,10 @@ func (e *Engine) getConnectionOptions(ctx context.Context, sessionCtx *common.Se
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
+	switch {
+	case e.Auth.IsTokenAuthEnabled() && sessionCtx.Database.IsTokenAuthEnabled():
+		tlsConfig = nil
+	}
 	return []topology.ConnectionOption{
 		topology.WithTLSConfig(func(*tls.Config) *tls.Config {
 			return tlsConfig
@@ -180,6 +184,20 @@ func (e *Engine) getAuthenticator(ctx context.Context, sessionCtx *common.Sessio
 	switch {
 	case isAtlasDB && awsutils.IsRoleARN(sessionCtx.DatabaseUser):
 		return e.getAWSAuthenticator(ctx, sessionCtx)
+	case e.Auth.IsTokenAuthEnabled() && sessionCtx.Database.IsTokenAuthEnabled():
+		user, password, err := e.Auth.GetTokenAuthCredentials(ctx, sessionCtx)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		authenticator, err := auth.CreateAuthenticator(auth.SCRAMSHA256, &auth.Cred{
+			Username: user,
+			Password: password,
+			Source:   "admin",
+		})
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return authenticator, nil
 	default:
 		e.Log.Debug("Authenticating to database using certificates.")
 		authenticator, err := auth.CreateAuthenticator(auth.MongoDBX509, &auth.Cred{
