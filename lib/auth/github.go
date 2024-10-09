@@ -964,7 +964,7 @@ const (
 	GithubAuthPath = "oauth/authorize"
 
 	// GithubTokenPath is the GitHub token exchange endpoint
-	GithubTokenPath = "oauth/token"
+	GithubTokenPath = "v3/oauth/token"
 
 	// MaxPages is the maximum number of pagination links that will be followed.
 	MaxPages = 99
