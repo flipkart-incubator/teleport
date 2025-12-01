@@ -516,15 +516,26 @@ type upstreamHandle struct {
 	pings map[uint64]pendingPing
 
 	// sshServer is the most recently heartbeated ssh server resource (if any).
-	sshServer *types.ServerV2
-	// retryUpstert inidcates that writing the ssh server lease failed and should be retried.
-	retrySSHServerUpsert bool
-	// sshServerLease is used to keep alive an ssh server resource that was previously
-	// sent over a heartbeat.
-	sshServerLease *types.KeepAlive
-	// sshServerKeepAliveErrs is a counter used to track the number of failed keepalives
+	sshServer *heartBeatInfo[*types.ServerV2]
+
+	// databaseServers track database server details.
+	databaseServers map[resourceKey]*heartBeatInfo[*types.DatabaseServerV3]
+}
+
+type resourceKey struct {
+	hostID, name string
+}
+
+type heartBeatInfo[T any] struct {
+	// resource is the most recently heartbeated item (if any).
+	resource T
+	// retryUpsert indicates that writing the lease failed and should be retried.
+	retryUpsert bool
+	// lease is used to keep alive a resource that was previously sent over a heartbeat.
+	lease *types.KeepAlive
+	// keepAliveErrs is a counter used to track the number of failed keepalives
 	// with the above lease. too many failures clears the lease.
-	sshServerKeepAliveErrs int
+	keepAliveErrs int
 }
 
 func (h *upstreamHandle) HeartbeatInstance() {

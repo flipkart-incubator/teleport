@@ -160,6 +160,7 @@ func (process *TeleportProcess) initDatabaseService() (retErr error) {
 		ConnectionMonitor:    connMonitor,
 		ConnectedProxyGetter: proxyGetter,
 		TokenSourceConfig:    process.Config.Databases.TokenSourceConfig,
+		InventoryHandle:      process.inventoryHandle,
 	})
 	if err != nil {
 		return trace.Wrap(err)

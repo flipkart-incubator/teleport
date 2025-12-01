@@ -18,6 +18,9 @@ package srv
 
 import (
 	"context"
+	"errors"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"sync/atomic"
 	"time"
 
@@ -37,12 +40,12 @@ import (
 	"github.com/gravitational/teleport/lib/utils/interval"
 )
 
-// SSHServerHeartbeatConfig configures the HeartbeatV2 for an ssh server.
-type SSHServerHeartbeatConfig struct {
+// HeartbeatV2Config configures the HeartbeatV2.
+type HeartbeatV2Config[T any] struct {
 	// InventoryHandle is used to send heartbeats.
 	InventoryHandle inventory.DownstreamHandle
-	// GetServer gets the latest server spec.
-	GetServer func() *types.ServerV2
+	// GetResource gets the latest item to heartbeat.
+	GetResource func() T
 
 	// -- below values are all optional
 
@@ -59,17 +62,17 @@ type SSHServerHeartbeatConfig struct {
 	PollInterval time.Duration
 }
 
-func (c *SSHServerHeartbeatConfig) Check() error {
+func (c *HeartbeatV2Config[T]) Check() error {
 	if c.InventoryHandle == nil {
 		return trace.BadParameter("missing required parameter InventoryHandle for ssh heartbeat")
 	}
-	if c.GetServer == nil {
-		return trace.BadParameter("missing required parameter GetServer for ssh heartbeat")
+	if c.GetResource == nil {
+		return trace.BadParameter("missing required parameter GetResource for heartbeat")
 	}
 	return nil
 }
 
-func NewSSHServerHeartbeat(cfg SSHServerHeartbeatConfig) (*HeartbeatV2, error) {
+func NewSSHServerHeartbeat(cfg HeartbeatV2Config[*types.ServerV2]) (*HeartbeatV2, error) {
 	if err := cfg.Check(); err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -80,7 +83,7 @@ func NewSSHServerHeartbeat(cfg SSHServerHeartbeatConfig) (*HeartbeatV2, error) {
 		announcer:   cfg.Announcer,
 	}
 	inner.getServer = func(ctx context.Context) *types.ServerV2 {
-		server := cfg.GetServer()
+		server := cfg.GetResource()
 
 		if meta := metadataPtr.Load(); meta == nil {
 			go func() {
@@ -100,6 +103,25 @@ func NewSSHServerHeartbeat(cfg SSHServerHeartbeatConfig) (*HeartbeatV2, error) {
 		}
 
 		return server
+	}
+
+	return newHeartbeatV2(cfg.InventoryHandle, inner, heartbeatV2Config{
+		onHeartbeatInner: cfg.OnHeartbeat,
+		announceInterval: cfg.AnnounceInterval,
+		pollInterval:     cfg.PollInterval,
+	}), nil
+}
+
+// NewDatabaseServerHeartbeat creates a [HeartbeatV2] that can be used to update
+// the presence of [types.DatabaseServerV3].
+func NewDatabaseServerHeartbeat(cfg HeartbeatV2Config[*types.DatabaseServerV3]) (*HeartbeatV2, error) {
+	if err := cfg.Check(); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	inner := &dbServerHeartbeatV2{
+		getServer: func(ctx context.Context) *types.DatabaseServerV3 { return cfg.GetResource() },
+		announcer: cfg.Announcer,
 	}
 
 	return newHeartbeatV2(cfg.InventoryHandle, inner, heartbeatV2Config{
@@ -501,6 +523,64 @@ func (h *sshServerHeartbeatV2) Announce(ctx context.Context, sender inventory.Do
 		log.Warnf("Failed to perform inventory heartbeat for ssh server: %v", err)
 		return false
 	}
+	h.prev = server
+	return true
+}
+
+// dbServerHeartbeatV2 is the heartbeatV2 implementation for db servers.
+type dbServerHeartbeatV2 struct {
+	getServer func(ctx context.Context) *types.DatabaseServerV3
+	announcer auth.Announcer
+	prev      *types.DatabaseServerV3
+}
+
+func (h *dbServerHeartbeatV2) Poll(ctx context.Context) (changed bool) {
+	if h.prev == nil {
+		return true
+	}
+	return services.CompareServers(h.getServer(ctx), h.prev) == services.Different
+}
+
+func (h *dbServerHeartbeatV2) SupportsFallback() bool {
+	return h.announcer != nil
+}
+
+func (h *dbServerHeartbeatV2) FallbackAnnounce(ctx context.Context) (ok bool) {
+	if h.announcer == nil {
+		return false
+	}
+	server := h.getServer(ctx)
+	_, err := h.announcer.UpsertDatabaseServer(ctx, server)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+			log.Warnf("Failed to perform fallback heartbeat for database server: %v", err)
+		}
+		return false
+	}
+	h.prev = server
+	return true
+}
+
+func (h *dbServerHeartbeatV2) Announce(ctx context.Context, sender inventory.DownstreamSender) (ok bool) {
+	// DatabaseServer heartbeats via inventory control stream were not introduced in a major version,
+	// so there is a chance that the Auth server is unable to process the request via the inventory
+	// control stream. If the Auth server capabilities indicate as such, then use the fallback mechanism.
+	hello := sender.Hello()
+	switch {
+	case hello.Capabilities == nil:
+		return h.FallbackAnnounce(ctx)
+	case hello.Capabilities != nil && !hello.Capabilities.DatabaseHeartbeats:
+		return h.FallbackAnnounce(ctx)
+	}
+
+	server := h.getServer(ctx)
+	if err := sender.Send(ctx, proto.InventoryHeartbeat{DatabaseServer: h.getServer(ctx)}); err != nil {
+		if !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
+			log.Warnf("Failed to perform inventory heartbeat for database server: %v", err)
+		}
+		return false
+	}
+
 	h.prev = server
 	return true
 }

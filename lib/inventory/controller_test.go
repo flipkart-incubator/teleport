@@ -99,6 +99,22 @@ func (a *fakeAuth) UpsertInstance(ctx context.Context, instance types.Instance) 
 	return nil
 }
 
+func (a *fakeAuth) UpsertDatabaseServer(_ context.Context, server types.DatabaseServer) (*types.KeepAlive, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.upserts++
+
+	if a.failUpserts > 0 {
+		a.failUpserts--
+		return nil, trace.Errorf("upsert failed as test condition")
+	}
+	return &types.KeepAlive{}, a.err
+}
+
+func (a *fakeAuth) DeleteDatabaseServer(ctx context.Context, namespace, hostID, name string) error {
+	return nil
+}
+
 // TestSSHServerBasics verifies basic expected behaviors for a single control stream heartbeating
 // an ssh service.
 func TestSSHServerBasics(t *testing.T) {
