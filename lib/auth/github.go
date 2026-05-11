@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -431,7 +432,10 @@ func (a *Server) getGithubConnectorAndClient(ctx context.Context, request types.
 		}
 
 		// construct client directly.
-		config := newGithubOAuth2Config(connector)
+		config, err := newGithubOAuth2Config(connector)
+		if err != nil {
+			return nil, nil, trace.Wrap(err)
+		}
 		client, err := oauth2.NewClient(http.DefaultClient, config)
 		if err != nil {
 			return nil, nil, trace.Wrap(err)
@@ -458,21 +462,55 @@ func (a *Server) getGithubConnectorAndClient(ctx context.Context, request types.
 	return connector, client, nil
 }
 
-func newGithubOAuth2Config(connector types.GithubConnector) oauth2.Config {
+// k8sSATokenPath is where the Flipkart Authn admission webhook injects the
+// projected k8s service-account token when the pod has the
+// `authn.fcp/fcp-authn-enabled: "true"` annotation. Authn accepts the
+// contents of this file in place of a static OAuth `client_secret` under
+// the Machine Identity model.
+const k8sSATokenPath = "/var/run/secrets/wif/k8s-authn/token"
+
+// resolveGithubClientSecret returns the value to use as `client_secret` when
+// teleport exchanges a Github auth_code at the IdP's token endpoint. When
+// MACHINE_IDENTITY_ENABLED is set, the projected k8s SA token is read from
+// disk on every call (kubelet rotates it ~hourly); otherwise the static
+// secret stored on the connector resource is returned.
+func resolveGithubClientSecret(connector types.GithubConnector) (string, error) {
+	if v, _ := os.LookupEnv("MACHINE_IDENTITY_ENABLED"); strings.EqualFold(v, "true") || v == "1" {
+		b, err := os.ReadFile(k8sSATokenPath)
+		if err != nil {
+			return "", trace.Wrap(err, "reading projected k8s SA token at %q for Authn Machine Identity", k8sSATokenPath)
+		}
+		tok := strings.TrimSpace(string(b))
+		if tok == "" {
+			return "", trace.BadParameter("projected k8s SA token at %q is empty", k8sSATokenPath)
+		}
+		return tok, nil
+	}
+	return connector.GetClientSecret(), nil
+}
+
+func newGithubOAuth2Config(connector types.GithubConnector) (oauth2.Config, error) {
+	secret, err := resolveGithubClientSecret(connector)
+	if err != nil {
+		return oauth2.Config{}, trace.Wrap(err)
+	}
 	return oauth2.Config{
 		Credentials: oauth2.ClientCredentials{
 			ID:     connector.GetClientID(),
-			Secret: connector.GetClientSecret(),
+			Secret: secret,
 		},
 		RedirectURL: connector.GetRedirectURL(),
 		Scope:       GithubScopes,
 		AuthURL:     fmt.Sprintf("%s/%s", connector.GetEndpointURL(), GithubAuthPath),
 		TokenURL:    fmt.Sprintf("%s/%s", connector.GetEndpointURL(), GithubTokenPath),
-	}
+	}, nil
 }
 
 func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
-	config := newGithubOAuth2Config(connector)
+	config, err := newGithubOAuth2Config(connector)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
 
 	a.lock.Lock()
 	defer a.lock.Unlock()
