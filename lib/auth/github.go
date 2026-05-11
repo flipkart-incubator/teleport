@@ -432,11 +432,8 @@ func (a *Server) getGithubConnectorAndClient(ctx context.Context, request types.
 		}
 
 		// construct client directly.
-		config, err := newGithubOAuth2Config(connector)
-		if err != nil {
-			return nil, nil, trace.Wrap(err)
-		}
-		client, err := oauth2.NewClient(http.DefaultClient, config)
+		config := newGithubOAuth2Config(connector)
+		client, err := oauth2.NewClient(newGithubOAuth2HTTPClient(config.TokenURL), config)
 		if err != nil {
 			return nil, nil, trace.Wrap(err)
 		}
@@ -464,53 +461,112 @@ func (a *Server) getGithubConnectorAndClient(ctx context.Context, request types.
 
 // k8sSATokenPath is where the Flipkart Authn admission webhook injects the
 // projected k8s service-account token when the pod has the
-// `authn.fcp/fcp-authn-enabled: "true"` annotation. Authn accepts the
-// contents of this file in place of a static OAuth `client_secret` under
-// the Machine Identity model.
+// `authn.fcp/fcp-authn-enabled: "true"` annotation. Under Machine Identity,
+// Authn's auth_code endpoint authenticates the client via RFC 7521/7523
+// `client_assertion` (jwt-bearer) — the assertion value is this projected
+// SA token.
 const k8sSATokenPath = "/var/run/secrets/wif/k8s-authn/token"
 
-// resolveGithubClientSecret returns the value to use as `client_secret` when
-// teleport exchanges a Github auth_code at the IdP's token endpoint. When
-// MACHINE_IDENTITY_ENABLED is set, the projected k8s SA token is read from
-// disk on every call (kubelet rotates it ~hourly); otherwise the static
-// secret stored on the connector resource is returned.
-func resolveGithubClientSecret(connector types.GithubConnector) (string, error) {
-	if v, _ := os.LookupEnv("MACHINE_IDENTITY_ENABLED"); strings.EqualFold(v, "true") || v == "1" {
-		b, err := os.ReadFile(k8sSATokenPath)
-		if err != nil {
-			return "", trace.Wrap(err, "reading projected k8s SA token at %q for Authn Machine Identity", k8sSATokenPath)
-		}
-		tok := strings.TrimSpace(string(b))
-		if tok == "" {
-			return "", trace.BadParameter("projected k8s SA token at %q is empty", k8sSATokenPath)
-		}
-		return tok, nil
-	}
-	return connector.GetClientSecret(), nil
+// jwtBearerClientAssertionType is the RFC 7523 client-assertion type Authn
+// expects on the auth_code token endpoint when the client authenticates via
+// a JWT bearer (here, the projected k8s SA token) instead of a static
+// `client_secret`.
+const jwtBearerClientAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+// machineIdentityEnabled reports whether the Flipkart Authn Machine Identity
+// opt-in env flag is set. When false, teleport's Github OAuth flow uses the
+// legacy `client_secret` (static value persisted on the GithubConnector
+// resource). When true, the token-endpoint POST is rewritten on the wire to
+// authenticate via `client_assertion` + the projected k8s SA token.
+func machineIdentityEnabled() bool {
+	v, _ := os.LookupEnv("MACHINE_IDENTITY_ENABLED")
+	return strings.EqualFold(v, "true") || v == "1"
 }
 
-func newGithubOAuth2Config(connector types.GithubConnector) (oauth2.Config, error) {
-	secret, err := resolveGithubClientSecret(connector)
-	if err != nil {
-		return oauth2.Config{}, trace.Wrap(err)
-	}
+func newGithubOAuth2Config(connector types.GithubConnector) oauth2.Config {
 	return oauth2.Config{
 		Credentials: oauth2.ClientCredentials{
 			ID:     connector.GetClientID(),
-			Secret: secret,
+			Secret: connector.GetClientSecret(),
 		},
 		RedirectURL: connector.GetRedirectURL(),
 		Scope:       GithubScopes,
 		AuthURL:     fmt.Sprintf("%s/%s", connector.GetEndpointURL(), GithubAuthPath),
 		TokenURL:    fmt.Sprintf("%s/%s", connector.GetEndpointURL(), GithubTokenPath),
-	}, nil
+	}
 }
 
-func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
-	config, err := newGithubOAuth2Config(connector)
+// newGithubOAuth2HTTPClient returns the *http.Client to hand to oauth2.NewClient.
+// When MACHINE_IDENTITY_ENABLED is set, its transport intercepts POSTs to
+// tokenURL and swaps the static `client_secret` form field for
+// `client_assertion` + `client_assertion_type=jwt-bearer` per RFC 7521/7523,
+// using the projected k8s SA token as the assertion. When MI is off, the
+// transport is a passthrough and the legacy `client_secret` flows through
+// untouched.
+func newGithubOAuth2HTTPClient(tokenURL string) *http.Client {
+	return &http.Client{
+		Transport: &machineIdentityTransport{
+			base:     http.DefaultTransport,
+			tokenURL: tokenURL,
+		},
+	}
+}
+
+// machineIdentityTransport rewrites the OAuth token-endpoint request body
+// when the Authn Machine Identity opt-in is active. Outside of that one
+// (URL, method) pair it forwards requests unchanged.
+//
+// Authn's auth_code endpoint authenticates clients via RFC 7521/7523
+// jwt-bearer client assertions (rather than a static `client_secret`) under
+// the Machine Identity model. The CoreOS go-oidc/oauth2 library teleport
+// uses only knows how to send `client_id` + `client_secret`, so we hook the
+// HTTP transport and rewrite the form body on the wire.
+type machineIdentityTransport struct {
+	base     http.RoundTripper
+	tokenURL string
+}
+
+func (t *machineIdentityTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !machineIdentityEnabled() || req.Method != http.MethodPost || req.URL.String() != t.tokenURL {
+		return t.base.RoundTrip(req)
+	}
+
+	saToken, err := os.ReadFile(k8sSATokenPath)
+	if err != nil {
+		return nil, trace.Wrap(err, "reading projected k8s SA token at %q for Authn Machine Identity", k8sSATokenPath)
+	}
+	assertion := strings.TrimSpace(string(saToken))
+	if assertion == "" {
+		return nil, trace.BadParameter("projected k8s SA token at %q is empty", k8sSATokenPath)
+	}
+
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
+	if err := req.Body.Close(); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	vals, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	vals.Del("client_secret")
+	vals.Set("client_assertion_type", jwtBearerClientAssertionType)
+	vals.Set("client_assertion", assertion)
+
+	newBody := vals.Encode()
+	req.Body = io.NopCloser(strings.NewReader(newBody))
+	req.ContentLength = int64(len(newBody))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(newBody)), nil
+	}
+
+	return t.base.RoundTrip(req)
+}
+
+func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
+	config := newGithubOAuth2Config(connector)
 
 	a.lock.Lock()
 	defer a.lock.Unlock()
@@ -521,7 +577,7 @@ func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2
 	}
 
 	delete(a.githubClients, connector.GetName())
-	client, err := oauth2.NewClient(http.DefaultClient, config)
+	client, err := oauth2.NewClient(newGithubOAuth2HTTPClient(config.TokenURL), config)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
