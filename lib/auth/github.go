@@ -597,6 +597,7 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
+
 func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
 	config := newGithubOAuth2Config(connector)
 
