@@ -507,7 +507,9 @@ func newGithubOAuth2Config(connector types.GithubConnector) oauth2.Config {
 func newGithubOAuth2HTTPClient(tokenURL string) *http.Client {
 	return &http.Client{
 		Transport: &machineIdentityTransport{
-			base:     http.DefaultTransport,
+			// loggingTransport sits inside machineIdentityTransport so it logs
+			// the already-rewritten request — what actually hits the wire.
+			base:     &loggingTransport{inner: http.DefaultTransport},
 			tokenURL: tokenURL,
 		},
 	}
@@ -564,6 +566,35 @@ func (t *machineIdentityTransport) RoundTrip(req *http.Request) (*http.Response,
 	}
 
 	return t.base.RoundTrip(req)
+}
+
+// loggingTransport emits a DEBUG log line for every outbound request and its
+// response. Placed as the innermost transport so it captures the request
+// after machineIdentityTransport has rewritten it — i.e. what actually goes
+// on the wire. Remove once debugging is complete.
+type loggingTransport struct {
+	inner http.RoundTripper
+}
+
+func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if dump, err := httputil.DumpRequestOut(req, true); err != nil {
+		log.WithError(err).Warn("[authn-debug] failed to dump outgoing request")
+	} else {
+		log.Debugf("[authn-debug] OUTGOING REQUEST:\n%s", dump)
+	}
+
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if dump, err := httputil.DumpResponse(resp, true); err != nil {
+		log.WithError(err).Warn("[authn-debug] failed to dump response")
+	} else {
+		log.Debugf("[authn-debug] RESPONSE:\n%s", dump)
+	}
+
+	return resp, nil
 }
 
 func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
