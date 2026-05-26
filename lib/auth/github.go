@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -436,7 +437,8 @@ func (a *Server) getGithubConnectorAndClient(ctx context.Context, request types.
 		if err != nil {
 			return nil, nil, trace.Wrap(err)
 		}
-		client, err := oauth2.NewClient(http.DefaultClient, config)
+		httpClient := &http.Client{Transport: &loggingTransport{inner: http.DefaultTransport}}
+		client, err := oauth2.NewClient(httpClient, config)
 		if err != nil {
 			return nil, nil, trace.Wrap(err)
 		}
@@ -506,6 +508,35 @@ func newGithubOAuth2Config(connector types.GithubConnector) (oauth2.Config, erro
 	}, nil
 }
 
+// loggingTransport wraps an http.RoundTripper and emits a debug log line for
+// every outbound request and its response. It is used to inspect the Authn
+// token-exchange call when MACHINE_IDENTITY_ENABLED is set.
+// Remove (or gate behind a build tag) once debugging is complete.
+type loggingTransport struct {
+	inner http.RoundTripper
+}
+
+func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if dump, err := httputil.DumpRequestOut(req, true); err != nil {
+		log.WithError(err).Warn("[authn-debug] failed to dump outgoing request")
+	} else {
+		log.Debugf("[authn-debug] OUTGOING REQUEST:\n%s", dump)
+	}
+
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if dump, err := httputil.DumpResponse(resp, true); err != nil {
+		log.WithError(err).Warn("[authn-debug] failed to dump response")
+	} else {
+		log.Debugf("[authn-debug] RESPONSE:\n%s", dump)
+	}
+
+	return resp, nil
+}
+
 func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
 	config, err := newGithubOAuth2Config(connector)
 	if err != nil {
@@ -521,7 +552,8 @@ func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2
 	}
 
 	delete(a.githubClients, connector.GetName())
-	client, err := oauth2.NewClient(http.DefaultClient, config)
+	httpClient := &http.Client{Transport: &loggingTransport{inner: http.DefaultTransport}}
+	client, err := oauth2.NewClient(httpClient, config)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
