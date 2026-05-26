@@ -537,6 +537,50 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
+// jwtBearerAssertionType is the client_assertion_type value for JWT Bearer
+// client authentication as defined by RFC 7523.
+const jwtBearerAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+
+// machineIdentityTransport rewrites the OAuth2 token-exchange POST so that the
+// k8s SA token is sent as a client_assertion (RFC 7523 JWT Bearer) rather than
+// a client_secret. It also strips the Authorization: Basic header that the
+// oauth2 library adds automatically, since Authn authenticates the client via
+// the assertion alone.
+type machineIdentityTransport struct {
+	inner http.RoundTripper
+}
+
+func (t *machineIdentityTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.Body == nil {
+		return t.inner.RoundTrip(req)
+	}
+
+	body, err := io.ReadAll(req.Body)
+	req.Body.Close()
+	if err != nil {
+		return nil, trace.Wrap(err, "reading token request body")
+	}
+
+	vals, err := url.ParseQuery(string(body))
+	if err != nil {
+		return nil, trace.Wrap(err, "parsing token request body")
+	}
+
+	if secret := vals.Get("client_secret"); secret != "" {
+		vals.Del("client_secret")
+		vals.Set("client_assertion", secret)
+		vals.Set("client_assertion_type", jwtBearerAssertionType)
+
+		req = req.Clone(req.Context())
+		req.Header.Del("Authorization") // strip Basic auth; assertion authenticates the client
+		newBody := vals.Encode()
+		req.Body = io.NopCloser(strings.NewReader(newBody))
+		req.ContentLength = int64(len(newBody))
+	}
+
+	return t.inner.RoundTrip(req)
+}
+
 func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2.Client, error) {
 	config, err := newGithubOAuth2Config(connector)
 	if err != nil {
@@ -552,8 +596,13 @@ func (a *Server) getGithubOAuth2Client(connector types.GithubConnector) (*oauth2
 	}
 
 	delete(a.githubClients, connector.GetName())
-	httpClient := &http.Client{Transport: &loggingTransport{inner: http.DefaultTransport}}
-	client, err := oauth2.NewClient(httpClient, config)
+	var transport http.RoundTripper = &loggingTransport{inner: http.DefaultTransport}
+	if v, _ := os.LookupEnv("MACHINE_IDENTITY_ENABLED"); strings.EqualFold(v, "true") || v == "1" {
+		// Wrap with machineIdentityTransport first so it rewrites the request
+		// before loggingTransport captures what actually goes on the wire.
+		transport = &machineIdentityTransport{inner: transport}
+	}
+	client, err := oauth2.NewClient(&http.Client{Transport: transport}, config)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
