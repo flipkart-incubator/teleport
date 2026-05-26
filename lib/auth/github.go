@@ -559,11 +559,18 @@ func (t *machineIdentityTransport) RoundTrip(req *http.Request) (*http.Response,
 	vals.Set("client_assertion", assertion)
 
 	newBody := vals.Encode()
+
+	// Clone before mutating so we don't modify the original request.
+	req = req.Clone(req.Context())
 	req.Body = io.NopCloser(strings.NewReader(newBody))
 	req.ContentLength = int64(len(newBody))
 	req.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader(newBody)), nil
 	}
+	// Strip the Authorization: Basic header the oauth2 library adds from
+	// config.Credentials.Secret — Authn authenticates the client via the
+	// client_assertion alone; sending Basic auth alongside it confuses it.
+	req.Header.Del("Authorization")
 
 	return t.base.RoundTrip(req)
 }
