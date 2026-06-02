@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/go-mysql-org/go-mysql/client"
@@ -283,10 +282,11 @@ func (e *Engine) connect(ctx context.Context, sessionCtx *common.Session) (*clie
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-		// Enable TLS only when the database port starts with "60", otherwise
-		// disable it by using a no-op connect option. The default connectOpt
-		// (which applies tlsConfig) is kept for TLS-enabled ports.
-		if !isTLSPort(sessionCtx.Database.GetURI()) {
+		// Enable TLS only when the database is fronted by a TLS-terminating SQL
+		// proxy (e.g. ProxySQL). Otherwise disable it by using a no-op connect
+		// option. The default connectOpt (which applies tlsConfig) is kept for
+		// proxied databases.
+		if !sessionCtx.Database.IsProxySQLEnabled() {
 			connectOpt = func(conn *client.Conn) {}
 		}
 	}
@@ -315,23 +315,6 @@ func (e *Engine) connect(ctx context.Context, sessionCtx *common.Session) (*clie
 		return nil, common.ConvertConnectError(err, sessionCtx)
 	}
 	return conn, nil
-}
-
-// tlsPortPrefix is the database port prefix that indicates the upstream server
-// expects a TLS connection. Ports beginning with this prefix (e.g. 60xx) enable
-// TLS; all others connect in plaintext.
-const tlsPortPrefix = "60"
-
-// isTLSPort reports whether TLS should be enabled for the given database URI.
-// TLS is considered enabled when the port portion of the URI starts with
-// tlsPortPrefix, and disabled otherwise.
-func isTLSPort(uri string) bool {
-	_, port, err := net.SplitHostPort(uri)
-	if err != nil {
-		// Fall back to no TLS if the URI does not contain a parseable port.
-		return false
-	}
-	return strings.HasPrefix(port, tlsPortPrefix)
 }
 
 func withClientCapabilities(caps ...uint32) func(conn *client.Conn) {

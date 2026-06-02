@@ -139,6 +139,9 @@ type Database interface {
 	GetCloud() string
 	// IsTokenAuthEnabled returns true if for a certain db token auth should be used instead of certificate auth
 	IsTokenAuthEnabled() bool
+	// IsProxySQLEnabled returns true if the database is fronted by a TLS-terminating
+	// SQL proxy (e.g. ProxySQL) and the upstream connection should be made over TLS.
+	IsProxySQLEnabled() bool
 }
 
 // NewDatabaseV3 creates a new database resource.
@@ -160,6 +163,12 @@ func (d *DatabaseV3) GetVersion() string {
 
 func (d *DatabaseV3) IsTokenAuthEnabled() bool {
 	return d.Metadata.IsTokenAuthEnabled()
+}
+
+// IsProxySQLEnabled returns true if the database is fronted by a TLS-terminating
+// SQL proxy (e.g. ProxySQL) and the upstream connection should be made over TLS.
+func (d *DatabaseV3) IsProxySQLEnabled() bool {
+	return d.Metadata.IsProxySQLEnabled()
 }
 
 // GetKind returns the database resource kind.
