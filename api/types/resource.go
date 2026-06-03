@@ -459,6 +459,17 @@ func (m *Metadata) IsTokenAuthEnabled() bool {
 	return tokenAuthEnabled
 }
 
+// IsProxySQLEnabled returns true when the database is fronted by a
+// TLS-terminating SQL proxy (e.g. ProxySQL) and the upstream connection
+// from the agent should be made over TLS.
+func (m *Metadata) IsProxySQLEnabled() bool {
+	if m.Labels == nil {
+		return false
+	}
+	proxySQLEnabled, _ := utils.ParseBool(m.Labels[ProxySQLEnabledLabel])
+	return proxySQLEnabled
+}
+
 // CheckAndSetDefaults checks validity of all parameters and sets defaults
 func (m *Metadata) CheckAndSetDefaults() error {
 	if m.Name == "" {

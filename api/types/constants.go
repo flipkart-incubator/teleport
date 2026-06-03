@@ -726,6 +726,11 @@ const (
 	// TokenAuthEnabledLabel is used identify whether enable token based authentication instead of regular
 	// certificate based authentication
 	TokenAuthEnabledLabel = TeleportNamespace + "/token-auth-enabled"
+
+	// ProxySQLEnabledLabel identifies whether a database is fronted by a TLS-terminating
+	// SQL proxy (e.g. ProxySQL). When set to true, the agent establishes the upstream
+	// connection over TLS; otherwise the upstream connection is made in plaintext.
+	ProxySQLEnabledLabel = TeleportNamespace + "/proxysql-enabled"
 )
 
 var (
